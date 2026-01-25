@@ -35,6 +35,7 @@ library
   build-depends:
       base >= 4.9 && < 5
     , bytestring >= 0.9 && < 0.13
+    , ppad-ripemd160
     , ppad-secp256k1
     , ppad-sha256
 
