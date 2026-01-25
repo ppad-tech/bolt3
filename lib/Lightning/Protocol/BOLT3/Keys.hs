@@ -289,9 +289,10 @@ flip_bit b bs =
 
 -- Per-commitment secret storage ------------------------------------------
 
--- | Entry in the secret store: (index, secret).
+-- | Entry in the secret store: (bucket, index, secret).
 data SecretEntry = SecretEntry
-  { se_index  :: {-# UNPACK #-} !Word64
+  { se_bucket :: {-# UNPACK #-} !Int
+  , se_index  :: {-# UNPACK #-} !Word64
   , se_secret :: !BS.ByteString
   } deriving (Eq, Show, Generic)
 
@@ -335,33 +336,27 @@ insert_secret
   -> Maybe SecretStore
 insert_secret secret idx (SecretStore known) = do
   let !bucket = where_to_put_secret idx
-  -- Validate: for each bucket 0..bucket-1, check derivation
+  -- Validate: for each bucket < this bucket, check we can derive
   validated <- validateBuckets bucket known
   if validated
     then
-      -- Insert at bucket position, removing any existing entry at
-      -- same or higher bucket
-      let !known' = insertAt bucket (SecretEntry idx secret) known
-      in  pure $! SecretStore known'
+      -- Remove entries at bucket >= this bucket, then insert
+      let !known' = filter (\e -> se_bucket e < bucket) known
+          !entry = SecretEntry bucket idx secret
+      in  pure $! SecretStore (known' ++ [entry])
     else Nothing
   where
     validateBuckets :: Int -> [SecretEntry] -> Maybe Bool
-    validateBuckets b entries = go 0 entries where
-      go !_ [] = Just True
-      go !currentB (SecretEntry knownIdx knownSecret : rest)
-        | currentB >= b = Just True
+    validateBuckets b entries = go entries where
+      go [] = Just True
+      go (SecretEntry entryBucket knownIdx knownSecret : rest)
+        | entryBucket >= b = go rest  -- skip entries at higher buckets
         | otherwise =
             -- Check if we can derive the known secret from the new one
             let !derived = derive_secret secret b knownIdx
             in  if derived == knownSecret
-                then go (currentB + 1) rest
+                then go rest
                 else Nothing
-
-    insertAt :: Int -> SecretEntry -> [SecretEntry] -> [SecretEntry]
-    insertAt _ entry [] = [entry]
-    insertAt b entry entries@(_:_)
-      | length entries <= b = entries ++ [entry]
-      | otherwise = take b entries ++ [entry]
 {-# INLINE insert_secret #-}
 
 -- | Derive a previously-received secret from the store.
@@ -375,15 +370,15 @@ derive_old_secret
   :: Word64       -- ^ target index
   -> SecretStore  -- ^ store
   -> Maybe BS.ByteString
-derive_old_secret targetIdx (SecretStore known) = go 0 known where
-  go :: Int -> [SecretEntry] -> Maybe BS.ByteString
-  go !_ [] = Nothing
-  go !b (SecretEntry knownIdx knownSecret : rest) =
-    -- Mask off the non-zero prefix of the index
-    let !mask = complement ((1 `shiftL` b) - 1)
+derive_old_secret targetIdx (SecretStore known) = go known where
+  go :: [SecretEntry] -> Maybe BS.ByteString
+  go [] = Nothing
+  go (SecretEntry bucket knownIdx knownSecret : rest) =
+    -- Mask off the non-zero prefix of the index using the entry's bucket
+    let !mask = complement ((1 `shiftL` bucket) - 1)
     in  if (targetIdx .&. mask) == knownIdx
-        then Just $! derive_secret knownSecret b targetIdx
-        else go (b + 1) rest
+        then Just $! derive_secret knownSecret bucket targetIdx
+        else go rest
 
   complement :: Word64 -> Word64
   complement x = x `xor` 0xFFFFFFFFFFFFFFFF

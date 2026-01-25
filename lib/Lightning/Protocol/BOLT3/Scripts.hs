@@ -198,17 +198,17 @@ push_cltv !n
     encode_scriptnum :: Word32 -> BS.ByteString
     encode_scriptnum 0 = BS.empty
     encode_scriptnum !v =
-      let -- Build bytes little-endian
-          go :: Word32 -> [Word8] -> [Word8]
-          go 0 acc = acc
-          go !x acc = go (x `shiftR` 8) (fromIntegral (x .&. 0xff) : acc)
-          !bytes = reverse (go v [])
-          -- If high bit set, need to add 0x00 for positive numbers
-          !result = case bytes of
-            [] -> []
-            (b:_) | b .&. 0x80 /= 0 -> 0x00 : bytes
+      let -- Build bytes little-endian (LSB first)
+          go :: Word32 -> [Word8]
+          go 0 = []
+          go !x = fromIntegral (x .&. 0xff) : go (x `shiftR` 8)
+          !bytes = go v
+          -- If MSB has high bit set, need 0x00 suffix for positive numbers
+          !result = case reverse bytes of
+            [] -> bytes
+            (msb:_) | msb .&. 0x80 /= 0 -> bytes ++ [0x00]
             _ -> bytes
-      in BS.pack (reverse result)
+      in BS.pack result
 {-# INLINE push_cltv #-}
 
 -- | Build script from builder.
@@ -364,15 +364,18 @@ to_remote_script (RemotePubkey (Pubkey !pk)) !features
 
 -- | Witness for spending to_remote output.
 --
--- With option_anchors, input nSequence must be 1.
+-- With option_anchors (P2WSH), input nSequence must be 1.
+-- Witness: @<remote_sig>@ (witness script appended by caller)
 --
--- Witness: @<remote_sig>@ (for anchors, witness script appended by caller)
--- For P2WPKH: @<remote_sig> <remotepubkey>@
+-- Without option_anchors (P2WPKH):
+-- Witness: @<remote_sig> <remotepubkey>@
 --
--- >>> to_remote_witness sig
--- Witness [sig]
-to_remote_witness :: BS.ByteString -> Witness
-to_remote_witness !sig = Witness [sig]
+-- >>> to_remote_witness sig pk (ChannelFeatures False)
+-- Witness [sig, pk]
+to_remote_witness :: BS.ByteString -> RemotePubkey -> ChannelFeatures -> Witness
+to_remote_witness !sig (RemotePubkey (Pubkey !pk)) !features
+  | has_anchors features = Witness [sig]
+  | otherwise = Witness [sig, pk]
 
 -- anchor outputs --------------------------------------------------------------
 
