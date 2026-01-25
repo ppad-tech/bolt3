@@ -4,6 +4,7 @@ module Main where
 
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base16 as B16
+import Data.Maybe (isJust, isNothing)
 import Test.Tasty
 import Test.Tasty.HUnit
 import Lightning.Protocol.BOLT3
@@ -24,6 +25,9 @@ main = defaultMain $ testGroup "ppad-bolt3" [
     ]
   , testGroup "Trimming" [
       trimmingTests
+    ]
+  , testGroup "Smart constructors" [
+      smartConstructorTests
     ]
   ]
 
@@ -263,4 +267,71 @@ trimmingTests = testGroup "HTLC trimming" [
       -- threshold = 546 + 3515 = 4061
       -- 800 < 4061, so trimmed
       is_trimmed dust feerate features htlc @?= True
+  ]
+
+-- Smart constructor tests -----------------------------------------------------
+
+smartConstructorTests :: TestTree
+smartConstructorTests = testGroup "validation" [
+    -- 33-byte types
+    testCase "pubkey accepts 33 bytes" $ do
+      let bs = BS.replicate 33 0x02
+      isJust (pubkey bs) @?= True
+  , testCase "pubkey rejects 32 bytes" $ do
+      let bs = BS.replicate 32 0x02
+      isNothing (pubkey bs) @?= True
+  , testCase "pubkey rejects 34 bytes" $ do
+      let bs = BS.replicate 34 0x02
+      isNothing (pubkey bs) @?= True
+  , testCase "point accepts 33 bytes" $ do
+      let bs = BS.replicate 33 0x03
+      isJust (point bs) @?= True
+  , testCase "point rejects 32 bytes" $ do
+      let bs = BS.replicate 32 0x03
+      isNothing (point bs) @?= True
+
+    -- 32-byte types
+  , testCase "seckey accepts 32 bytes" $ do
+      let bs = BS.replicate 32 0x01
+      isJust (seckey bs) @?= True
+  , testCase "seckey rejects 31 bytes" $ do
+      let bs = BS.replicate 31 0x01
+      isNothing (seckey bs) @?= True
+  , testCase "seckey rejects 33 bytes" $ do
+      let bs = BS.replicate 33 0x01
+      isNothing (seckey bs) @?= True
+  , testCase "txid accepts 32 bytes" $ do
+      let bs = BS.replicate 32 0x00
+      isJust (txid bs) @?= True
+  , testCase "txid rejects 31 bytes" $ do
+      let bs = BS.replicate 31 0x00
+      isNothing (txid bs) @?= True
+  , testCase "payment_hash accepts 32 bytes" $ do
+      let bs = BS.replicate 32 0xab
+      isJust (payment_hash bs) @?= True
+  , testCase "payment_hash rejects 33 bytes" $ do
+      let bs = BS.replicate 33 0xab
+      isNothing (payment_hash bs) @?= True
+  , testCase "payment_preimage accepts 32 bytes" $ do
+      let bs = BS.replicate 32 0xcd
+      isJust (payment_preimage bs) @?= True
+  , testCase "payment_preimage rejects 31 bytes" $ do
+      let bs = BS.replicate 31 0xcd
+      isNothing (payment_preimage bs) @?= True
+  , testCase "per_commitment_secret accepts 32 bytes" $ do
+      let bs = BS.replicate 32 0xef
+      isJust (per_commitment_secret bs) @?= True
+  , testCase "per_commitment_secret rejects 33 bytes" $ do
+      let bs = BS.replicate 33 0xef
+      isNothing (per_commitment_secret bs) @?= True
+
+    -- 48-bit commitment number
+  , testCase "commitment_number accepts 0" $ do
+      isJust (commitment_number 0) @?= True
+  , testCase "commitment_number accepts 2^48-1" $ do
+      isJust (commitment_number 281474976710655) @?= True
+  , testCase "commitment_number rejects 2^48" $ do
+      isNothing (commitment_number 281474976710656) @?= True
+  , testCase "commitment_number rejects maxBound Word64" $ do
+      isNothing (commitment_number maxBound) @?= True
   ]
