@@ -63,21 +63,28 @@ module Lightning.Protocol.BOLT3 (
 
     -- ** Keys and points
   , Pubkey(..)
+  , pubkey
   , Seckey(..)
+  , seckey
   , Point(..)
+  , point
 
     -- ** Hashes
   , PaymentHash(..)
+  , payment_hash
   , PaymentPreimage(..)
+  , payment_preimage
 
     -- ** Transaction primitives
   , TxId(..)
+  , txid
   , Outpoint(..)
   , Sequence(..)
   , Locktime(..)
 
     -- ** Channel parameters
   , CommitmentNumber(..)
+  , commitment_number
   , ToSelfDelay(..)
   , CltvExpiry(..)
   , DustLimit(..)
@@ -91,6 +98,7 @@ module Lightning.Protocol.BOLT3 (
   , Basepoints(..)
   , PerCommitmentPoint(..)
   , PerCommitmentSecret(..)
+  , per_commitment_secret
   , RevocationBasepoint(..)
   , PaymentBasepoint(..)
   , DelayedPaymentBasepoint(..)
