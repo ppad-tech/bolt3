@@ -195,21 +195,17 @@ data HTLCDirection
   deriving (Eq, Ord, Show, Generic)
 
 -- | HTLC output details.
+--
+-- NOTE: No Ord instance is provided. BOLT #3 requires output ordering by
+-- amount then scriptPubKey, but scriptPubKey depends on derived keys which
+-- are not available here. Use 'sort_outputs' in Tx module for proper BIP69
+-- output ordering.
 data HTLC = HTLC
   { htlc_direction    :: !HTLCDirection
   , htlc_amount_msat  :: {-# UNPACK #-} !MilliSatoshi
   , htlc_payment_hash :: {-# UNPACK #-} !PaymentHash
   , htlc_cltv_expiry  :: {-# UNPACK #-} !CltvExpiry
   } deriving (Eq, Show, Generic)
-
--- Define ordering per BOLT #3: by amount (sat), then scriptpubkey, then expiry
-instance Ord HTLC where
-  compare h1 h2 =
-    let sat1 = msat_to_sat (htlc_amount_msat h1)
-        sat2 = msat_to_sat (htlc_amount_msat h2)
-    in case compare sat1 sat2 of
-         EQ -> compare (htlc_cltv_expiry h1) (htlc_cltv_expiry h2)
-         other -> other
 
 -- basepoints ------------------------------------------------------------------
 
