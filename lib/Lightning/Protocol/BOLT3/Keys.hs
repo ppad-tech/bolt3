@@ -49,7 +49,7 @@ module Lightning.Protocol.BOLT3.Keys (
   , obscured_commitment_number
   ) where
 
-import Data.Bits ((.&.), xor, shiftL, shiftR, testBit, complementBit)
+import Data.Bits ((.&.), xor, shiftL, testBit, complementBit)
 import qualified Data.ByteString as BS
 import Data.Word (Word64)
 import GHC.Generics (Generic)
@@ -70,9 +70,9 @@ derive_per_commitment_point
   :: PerCommitmentSecret
   -> Maybe PerCommitmentPoint
 derive_per_commitment_point (PerCommitmentSecret sec) = do
-  sk <- S.parse_seckey sec
-  let !pk = S.derive_pubkey sk
-      !bs = S.serialize_point pk
+  sk <- S.parse_int256 sec
+  pk <- S.derive_pub sk
+  let !bs = S.serialize_point pk
   pure $! PerCommitmentPoint (Point bs)
 {-# INLINE derive_per_commitment_point #-}
 
@@ -94,15 +94,14 @@ derive_pubkey
   -> Maybe Pubkey
 derive_pubkey (Point basepointBs) (PerCommitmentPoint (Point pcpBs)) = do
   basepoint <- S.parse_point basepointBs
-  pcp <- S.parse_point pcpBs
   -- SHA256(per_commitment_point || basepoint)
   let !h = SHA256.hash (pcpBs <> basepointBs)
   -- Treat hash as scalar and multiply by G
-  tweak <- S.parse_seckey h
-  let !tweakPoint = S.derive_pubkey tweak
+  tweak <- S.parse_int256 h
+  tweakPoint <- S.derive_pub tweak
   -- Add basepoint + tweak*G
-  result <- S.add_point basepoint tweakPoint
-  let !bs = S.serialize_point result
+  let !result = S.add basepoint tweakPoint
+      !bs = S.serialize_point result
   pure $! Pubkey bs
 {-# INLINE derive_pubkey #-}
 
@@ -196,13 +195,13 @@ derive_revocationpubkey
     -- SHA256(per_commitment_point || revocation_basepoint)
     let !h2 = SHA256.hash (pcpBs <> rbpBs)
     -- Multiply points by their respective scalars
-    s1 <- S.parse_seckey h1
-    s2 <- S.parse_seckey h2
-    let !p1 = S.mul_point rbp s1  -- revocation_basepoint * h1
-        !p2 = S.mul_point pcp s2  -- per_commitment_point * h2
+    s1 <- S.parse_int256 h1
+    s2 <- S.parse_int256 h2
+    p1 <- S.mul rbp s1  -- revocation_basepoint * h1
+    p2 <- S.mul pcp s2  -- per_commitment_point * h2
     -- Add the two points
-    result <- S.add_point p1 p2
-    let !bs = S.serialize_point result
+    let !result = S.add p1 p2
+        !bs = S.serialize_point result
     pure $! RevocationPubkey (Pubkey bs)
 {-# INLINE derive_revocationpubkey #-}
 
@@ -348,7 +347,7 @@ insert_secret secret idx (SecretStore known) = do
   where
     validateBuckets :: Int -> [SecretEntry] -> Maybe Bool
     validateBuckets b entries = go 0 entries where
-      go !currentB [] = Just True
+      go !_ [] = Just True
       go !currentB (SecretEntry knownIdx knownSecret : rest)
         | currentB >= b = Just True
         | otherwise =
@@ -359,8 +358,8 @@ insert_secret secret idx (SecretStore known) = do
                 else Nothing
 
     insertAt :: Int -> SecretEntry -> [SecretEntry] -> [SecretEntry]
-    insertAt b entry [] = [entry]
-    insertAt b entry entries@(e:es)
+    insertAt _ entry [] = [entry]
+    insertAt b entry entries@(_:_)
       | length entries <= b = entries ++ [entry]
       | otherwise = take b entries ++ [entry]
 {-# INLINE insert_secret #-}
@@ -378,7 +377,7 @@ derive_old_secret
   -> Maybe BS.ByteString
 derive_old_secret targetIdx (SecretStore known) = go 0 known where
   go :: Int -> [SecretEntry] -> Maybe BS.ByteString
-  go !b [] = Nothing
+  go !_ [] = Nothing
   go !b (SecretEntry knownIdx knownSecret : rest) =
     -- Mask off the non-zero prefix of the index
     let !mask = complement ((1 `shiftL` b) - 1)
