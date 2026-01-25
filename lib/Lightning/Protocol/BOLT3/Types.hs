@@ -20,21 +20,28 @@ module Lightning.Protocol.BOLT3.Types (
 
     -- * Keys and points
   , Pubkey(..)
+  , pubkey
   , Seckey(..)
+  , seckey
   , Point(..)
+  , point
 
     -- * Hashes
   , PaymentHash(..)
+  , payment_hash
   , PaymentPreimage(..)
+  , payment_preimage
 
     -- * Transaction primitives
   , TxId(..)
+  , txid
   , Outpoint(..)
   , Sequence(..)
   , Locktime(..)
 
     -- * Channel parameters
   , CommitmentNumber(..)
+  , commitment_number
   , ToSelfDelay(..)
   , CltvExpiry(..)
   , DustLimit(..)
@@ -48,6 +55,7 @@ module Lightning.Protocol.BOLT3.Types (
   , Basepoints(..)
   , PerCommitmentPoint(..)
   , PerCommitmentSecret(..)
+  , per_commitment_secret
   , RevocationBasepoint(..)
   , PaymentBasepoint(..)
   , DelayedPaymentBasepoint(..)
@@ -118,6 +126,20 @@ sat_to_msat (Satoshi s) = MilliSatoshi (s * 1000)
 newtype Pubkey = Pubkey { unPubkey :: BS.ByteString }
   deriving (Eq, Ord, Show, Generic)
 
+-- | Parse a 33-byte compressed public key.
+--
+-- Returns Nothing if the input is not exactly 33 bytes.
+--
+-- >>> pubkey (BS.replicate 33 0x02)
+-- Just (Pubkey ...)
+-- >>> pubkey (BS.replicate 32 0x02)
+-- Nothing
+pubkey :: BS.ByteString -> Maybe Pubkey
+pubkey bs
+  | BS.length bs == 33 = Just (Pubkey bs)
+  | otherwise = Nothing
+{-# INLINE pubkey #-}
+
 -- | Secret key (32 bytes).
 newtype Seckey = Seckey { unSeckey :: BS.ByteString }
   deriving (Eq, Generic)
@@ -126,15 +148,42 @@ newtype Seckey = Seckey { unSeckey :: BS.ByteString }
 instance Show Seckey where
   show _ = "Seckey <redacted>"
 
+-- | Parse a 32-byte secret key.
+--
+-- Returns Nothing if the input is not exactly 32 bytes.
+seckey :: BS.ByteString -> Maybe Seckey
+seckey bs
+  | BS.length bs == 32 = Just (Seckey bs)
+  | otherwise = Nothing
+{-# INLINE seckey #-}
+
 -- | Elliptic curve point (33-byte compressed form).
 newtype Point = Point { unPoint :: BS.ByteString }
   deriving (Eq, Ord, Show, Generic)
+
+-- | Parse a 33-byte elliptic curve point.
+--
+-- Returns Nothing if the input is not exactly 33 bytes.
+point :: BS.ByteString -> Maybe Point
+point bs
+  | BS.length bs == 33 = Just (Point bs)
+  | otherwise = Nothing
+{-# INLINE point #-}
 
 -- hashes ----------------------------------------------------------------------
 
 -- | Payment hash (32 bytes, SHA256 of preimage).
 newtype PaymentHash = PaymentHash { unPaymentHash :: BS.ByteString }
   deriving (Eq, Ord, Show, Generic)
+
+-- | Parse a 32-byte payment hash.
+--
+-- Returns Nothing if the input is not exactly 32 bytes.
+payment_hash :: BS.ByteString -> Maybe PaymentHash
+payment_hash bs
+  | BS.length bs == 32 = Just (PaymentHash bs)
+  | otherwise = Nothing
+{-# INLINE payment_hash #-}
 
 -- | Payment preimage (32 bytes).
 newtype PaymentPreimage = PaymentPreimage { unPaymentPreimage :: BS.ByteString }
@@ -143,11 +192,29 @@ newtype PaymentPreimage = PaymentPreimage { unPaymentPreimage :: BS.ByteString }
 instance Show PaymentPreimage where
   show _ = "PaymentPreimage <redacted>"
 
+-- | Parse a 32-byte payment preimage.
+--
+-- Returns Nothing if the input is not exactly 32 bytes.
+payment_preimage :: BS.ByteString -> Maybe PaymentPreimage
+payment_preimage bs
+  | BS.length bs == 32 = Just (PaymentPreimage bs)
+  | otherwise = Nothing
+{-# INLINE payment_preimage #-}
+
 -- transaction primitives ------------------------------------------------------
 
 -- | Transaction ID (32 bytes, little-endian hash).
 newtype TxId = TxId { unTxId :: BS.ByteString }
   deriving (Eq, Ord, Show, Generic)
+
+-- | Parse a 32-byte transaction ID.
+--
+-- Returns Nothing if the input is not exactly 32 bytes.
+txid :: BS.ByteString -> Maybe TxId
+txid bs
+  | BS.length bs == 32 = Just (TxId bs)
+  | otherwise = Nothing
+{-# INLINE txid #-}
 
 -- | Transaction outpoint (txid + output index).
 data Outpoint = Outpoint
@@ -168,6 +235,15 @@ newtype Locktime = Locktime { unLocktime :: Word32 }
 -- | 48-bit commitment number.
 newtype CommitmentNumber = CommitmentNumber { unCommitmentNumber :: Word64 }
   deriving (Eq, Ord, Show, Generic, Num)
+
+-- | Parse a 48-bit commitment number.
+--
+-- Returns Nothing if the value exceeds 2^48 - 1.
+commitment_number :: Word64 -> Maybe CommitmentNumber
+commitment_number n
+  | n <= 281474976710655 = Just (CommitmentNumber n)
+  | otherwise = Nothing
+{-# INLINE commitment_number #-}
 
 -- | CSV delay for to_local outputs.
 newtype ToSelfDelay = ToSelfDelay { unToSelfDelay :: Word16 }
@@ -219,6 +295,15 @@ newtype PerCommitmentSecret = PerCommitmentSecret
 
 instance Show PerCommitmentSecret where
   show _ = "PerCommitmentSecret <redacted>"
+
+-- | Parse a 32-byte per-commitment secret.
+--
+-- Returns Nothing if the input is not exactly 32 bytes.
+per_commitment_secret :: BS.ByteString -> Maybe PerCommitmentSecret
+per_commitment_secret bs
+  | BS.length bs == 32 = Just (PerCommitmentSecret bs)
+  | otherwise = Nothing
+{-# INLINE per_commitment_secret #-}
 
 -- | Revocation basepoint.
 newtype RevocationBasepoint = RevocationBasepoint
