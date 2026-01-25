@@ -311,20 +311,20 @@ data HTLCTx = HTLCTx
   , htx_output_script      :: !Script
   } deriving (Eq, Show, Generic)
 
--- | Build an HTLC-timeout transaction.
+-- | Internal helper for HTLC transaction construction.
 --
--- * locktime: cltv_expiry
--- * sequence: 0 (or 1 with option_anchors)
--- * output: to_local style script with revocation and delayed paths
-build_htlc_timeout_tx :: HTLCContext -> HTLCTx
-build_htlc_timeout_tx ctx =
-  let !htlc = hc_htlc ctx
-      !amountSat = msat_to_sat (htlc_amount_msat htlc)
-      !fee = htlc_timeout_fee (hc_feerate ctx) (hc_features ctx)
+-- Both HTLC-timeout and HTLC-success transactions share the same
+-- structure, differing only in locktime and fee calculation.
+build_htlc_tx_common
+  :: HTLCContext
+  -> Locktime           -- ^ Transaction locktime
+  -> Satoshi            -- ^ Fee to subtract from output
+  -> HTLCTx
+build_htlc_tx_common ctx locktime fee =
+  let !amountSat = msat_to_sat (htlc_amount_msat $ hc_htlc ctx)
       !outputValue = if unSatoshi amountSat >= unSatoshi fee
                      then Satoshi (unSatoshi amountSat - unSatoshi fee)
                      else Satoshi 0
-      !locktime = Locktime (unCltvExpiry $ htlc_cltv_expiry htlc)
       !inputSeq = if has_anchors (hc_features ctx)
                    then Sequence 1
                    else Sequence 0
@@ -341,6 +341,18 @@ build_htlc_timeout_tx ctx =
        , htx_output_value = outputValue
        , htx_output_script = outputScript
        }
+{-# INLINE build_htlc_tx_common #-}
+
+-- | Build an HTLC-timeout transaction.
+--
+-- * locktime: cltv_expiry
+-- * sequence: 0 (or 1 with option_anchors)
+-- * output: to_local style script with revocation and delayed paths
+build_htlc_timeout_tx :: HTLCContext -> HTLCTx
+build_htlc_timeout_tx ctx =
+  let !fee = htlc_timeout_fee (hc_feerate ctx) (hc_features ctx)
+      !locktime = Locktime (unCltvExpiry $ htlc_cltv_expiry $ hc_htlc ctx)
+  in build_htlc_tx_common ctx locktime fee
 {-# INLINE build_htlc_timeout_tx #-}
 
 -- | Build an HTLC-success transaction.
@@ -350,27 +362,8 @@ build_htlc_timeout_tx ctx =
 -- * output: to_local style script with revocation and delayed paths
 build_htlc_success_tx :: HTLCContext -> HTLCTx
 build_htlc_success_tx ctx =
-  let !amountSat = msat_to_sat (htlc_amount_msat $ hc_htlc ctx)
-      !fee = htlc_success_fee (hc_feerate ctx) (hc_features ctx)
-      !outputValue = if unSatoshi amountSat >= unSatoshi fee
-                     then Satoshi (unSatoshi amountSat - unSatoshi fee)
-                     else Satoshi 0
-      !inputSeq = if has_anchors (hc_features ctx)
-                   then Sequence 1
-                   else Sequence 0
-      !outpoint = Outpoint (hc_commitment_txid ctx) (hc_output_index ctx)
-      !outputScript = to_p2wsh $ htlc_output_script
-        (hc_revocation_pubkey ctx)
-        (hc_to_self_delay ctx)
-        (hc_local_delayed ctx)
-  in HTLCTx
-       { htx_version = 2
-       , htx_locktime = Locktime 0
-       , htx_input_outpoint = outpoint
-       , htx_input_sequence = inputSeq
-       , htx_output_value = outputValue
-       , htx_output_script = outputScript
-       }
+  let !fee = htlc_success_fee (hc_feerate ctx) (hc_features ctx)
+  in build_htlc_tx_common ctx (Locktime 0) fee
 {-# INLINE build_htlc_success_tx #-}
 
 -- closing transaction ---------------------------------------------------------
