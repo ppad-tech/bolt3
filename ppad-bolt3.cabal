@@ -25,6 +25,13 @@ library
       -Wall
   exposed-modules:
       Lightning.Protocol.BOLT3
+      Lightning.Protocol.BOLT3.Decode
+      Lightning.Protocol.BOLT3.Encode
+      Lightning.Protocol.BOLT3.Keys
+      Lightning.Protocol.BOLT3.Scripts
+      Lightning.Protocol.BOLT3.Tx
+      Lightning.Protocol.BOLT3.Types
+      Lightning.Protocol.BOLT3.Validate
   build-depends:
       base >= 4.9 && < 5
     , bytestring >= 0.9 && < 0.13
