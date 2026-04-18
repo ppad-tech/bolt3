@@ -26,12 +26,20 @@
       ref  = "master";
       inputs.ppad-nixpkgs.follows = "ppad-nixpkgs";
     };
+    ppad-tx = {
+      type = "git";
+      url  = "git://git.ppad.tech/tx.git";
+      ref  = "master";
+      inputs.ppad-nixpkgs.follows = "ppad-nixpkgs";
+      inputs.ppad-sha256.follows = "ppad-sha256";
+    };
     flake-utils.follows = "ppad-nixpkgs/flake-utils";
     nixpkgs.follows = "ppad-nixpkgs/nixpkgs";
   };
 
   outputs = { self, nixpkgs, flake-utils, ppad-nixpkgs
-            , ppad-sha256, ppad-secp256k1, ppad-ripemd160 }:
+            , ppad-sha256, ppad-secp256k1, ppad-ripemd160
+            , ppad-tx }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         lib = "ppad-bolt3";
@@ -59,10 +67,13 @@
             (hlib.enableCabalFlag ripemd160 "llvm")
             [ llvm clang ];
 
+        tx = ppad-tx.packages.${system}.default;
+
         hpkgs = pkgs.haskell.packages.ghc910.extend (new: old: {
           ppad-sha256 = sha256-llvm;
           ppad-secp256k1 = secp256k1-llvm;
           ppad-ripemd160 = ripemd160-llvm;
+          ppad-tx = tx;
           ${lib} = new.callCabal2nix lib ./. { };
         });
 
