@@ -36,6 +36,11 @@ module Lightning.Protocol.BOLT3.Tx (
   , build_closing_tx
   , build_legacy_closing_tx
 
+    -- * Conversion to ppad-tx
+  , commitment_to_tx
+  , htlc_to_tx
+  , closing_to_tx
+
     -- * Transaction outputs
   , TxOutput(..)
   , OutputType(..)
@@ -56,8 +61,11 @@ module Lightning.Protocol.BOLT3.Tx (
   , sort_outputs
   ) where
 
+import qualified Bitcoin.Prim.Tx as BT
 import Data.Bits ((.&.), (.|.), shiftL, shiftR)
+import qualified Data.ByteString as BS
 import Data.List (sortBy)
+import Data.List.NonEmpty (NonEmpty(..), nonEmpty)
 import Data.Word (Word32, Word64)
 import GHC.Generics (Generic)
 import Lightning.Protocol.BOLT3.Keys
@@ -557,6 +565,81 @@ untrimmed_htlcs
 untrimmed_htlcs dust feerate features =
   filter (not . is_trimmed dust feerate features)
 {-# INLINE untrimmed_htlcs #-}
+
+-- conversion to ppad-tx -------------------------------------------------------
+
+-- | Convert a 'TxOutput' to a ppad-tx 'BT.TxOut'.
+toTxOut :: TxOutput -> BT.TxOut
+toTxOut o = BT.TxOut
+  { BT.txout_value =
+      unSatoshi (txout_value o)
+  , BT.txout_script_pubkey =
+      unScript (txout_script o)
+  }
+{-# INLINE toTxOut #-}
+
+-- | Convert a commitment transaction to a ppad-tx 'BT.Tx'.
+--
+-- Returns 'Nothing' if the transaction has no outputs.
+commitment_to_tx :: CommitmentTx -> Maybe BT.Tx
+commitment_to_tx ctx = do
+  outs <- nonEmpty (map toTxOut (ctx_outputs ctx))
+  let !input = BT.TxIn
+        { BT.txin_prevout = ctx_input_outpoint ctx
+        , BT.txin_script_sig = BS.empty
+        , BT.txin_sequence =
+            unSequence (ctx_input_sequence ctx)
+        }
+  pure $! BT.Tx
+    { BT.tx_version = ctx_version ctx
+    , BT.tx_inputs = input :| []
+    , BT.tx_outputs = outs
+    , BT.tx_witnesses = []
+    , BT.tx_locktime = unLocktime (ctx_locktime ctx)
+    }
+
+-- | Convert an HTLC transaction to a ppad-tx 'BT.Tx'.
+htlc_to_tx :: HTLCTx -> BT.Tx
+htlc_to_tx htx =
+  let !input = BT.TxIn
+        { BT.txin_prevout = htx_input_outpoint htx
+        , BT.txin_script_sig = BS.empty
+        , BT.txin_sequence =
+            unSequence (htx_input_sequence htx)
+        }
+      !output = BT.TxOut
+        { BT.txout_value =
+            unSatoshi (htx_output_value htx)
+        , BT.txout_script_pubkey =
+            unScript (htx_output_script htx)
+        }
+  in BT.Tx
+    { BT.tx_version = htx_version htx
+    , BT.tx_inputs = input :| []
+    , BT.tx_outputs = output :| []
+    , BT.tx_witnesses = []
+    , BT.tx_locktime = unLocktime (htx_locktime htx)
+    }
+
+-- | Convert a closing transaction to a ppad-tx 'BT.Tx'.
+--
+-- Returns 'Nothing' if the transaction has no outputs.
+closing_to_tx :: ClosingTx -> Maybe BT.Tx
+closing_to_tx ctx = do
+  outs <- nonEmpty (map toTxOut (cltx_outputs ctx))
+  let !input = BT.TxIn
+        { BT.txin_prevout = cltx_input_outpoint ctx
+        , BT.txin_script_sig = BS.empty
+        , BT.txin_sequence =
+            unSequence (cltx_input_sequence ctx)
+        }
+  pure $! BT.Tx
+    { BT.tx_version = cltx_version ctx
+    , BT.tx_inputs = input :| []
+    , BT.tx_outputs = outs
+    , BT.tx_witnesses = []
+    , BT.tx_locktime = unLocktime (cltx_locktime ctx)
+    }
 
 -- output ordering -------------------------------------------------------------
 

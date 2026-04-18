@@ -97,17 +97,6 @@ instance NFData ToSelfDelay where
 instance NFData CommitmentNumber where
   rnf (CommitmentNumber x) = rnf x
 
--- Parsing types
-instance NFData RawTx where
-  rnf (RawTx v i o w l) =
-    rnf v `seq` rnf i `seq` rnf o `seq` rnf w `seq` rnf l
-
-instance NFData RawInput where
-  rnf (RawInput o scr sq) = rnf o `seq` rnf scr `seq` rnf sq
-
-instance NFData RawOutput where
-  rnf (RawOutput v s) = rnf v `seq` rnf s
-
 -- Context types
 instance NFData CommitmentContext where
   rnf ctx = rnf (cc_funding_outpoint ctx) `seq`
@@ -182,14 +171,6 @@ instance NFData ValidationError where
   rnf (InvalidHTLCSequence a b) = rnf a `seq` rnf b
   rnf NoOutputs = ()
   rnf (TooManyOutputs a) = rnf a
-
--- Decode errors
-instance NFData DecodeError where
-  rnf (InsufficientBytes a b) = rnf a `seq` rnf b
-  rnf (InvalidMarker a) = rnf a
-  rnf (InvalidFlag a) = rnf a
-  rnf InvalidVarint = ()
-  rnf EmptyInput = ()
 
 main :: IO ()
 main = defaultMain [
@@ -282,14 +263,11 @@ main = defaultMain [
         whnf encode_closing_tx (build_closing_tx sampleClosingContext)
     ]
   , bgroup "parsing" [
-      env (pure $ encode_tx $ build_commitment_tx $
-             mkCommitmentContext htlcs0 noAnchors)
+      env (pure $ encodeTx0 htlcs0 noAnchors)
         $ \bs -> bench "decode_tx (0 htlcs)" $ whnf decode_tx bs
-    , env (pure $ encode_tx $ build_commitment_tx $
-             mkCommitmentContext htlcs10 noAnchors)
+    , env (pure $ encodeTx0 htlcs10 noAnchors)
         $ \bs -> bench "decode_tx (10 htlcs)" $ whnf decode_tx bs
-    , env (pure $ encode_tx $ build_commitment_tx $
-             mkCommitmentContext htlcs100 noAnchors)
+    , env (pure $ encodeTx0 htlcs100 noAnchors)
         $ \bs -> bench "decode_tx (100 htlcs)" $ whnf decode_tx bs
     ]
   , bgroup "validation" [
@@ -380,6 +358,14 @@ main = defaultMain [
        0xb7, 0xcf, 0xc8, 0x3b, 0xd5, 0x7b, 0x2e, 0x2c, 0x0d, 0x0d, 0xd2,
        0x5e, 0xaf, 0x46, 0x7a, 0x4a, 0x1c, 0x2a, 0x45, 0xce, 0x14, 0x86]
     samplePubkey3 = samplePubkey1
+
+    -- Helper to encode a commitment tx for decode benchmarks
+    encodeTx0 :: [HTLC] -> ChannelFeatures -> BS.ByteString
+    encodeTx0 htlcs features =
+      case encode_tx (build_commitment_tx
+             (mkCommitmentContext htlcs features)) of
+        Nothing -> BS.empty
+        Just bs -> bs
 
     -- Funding outpoint
     sampleFundingOutpoint :: OutPoint

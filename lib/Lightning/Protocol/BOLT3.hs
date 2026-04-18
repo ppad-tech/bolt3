@@ -235,31 +235,25 @@ module Lightning.Protocol.BOLT3 (
     -- ** Output ordering
   , sort_outputs
 
+    -- * Conversion to ppad-tx
+  , commitment_to_tx
+  , htlc_to_tx
+  , closing_to_tx
+
     -- * Serialization
   , encode_tx
   , encode_htlc_tx
   , encode_closing_tx
   , encode_tx_for_signing
-  , encode_varint
-  , encode_le32
-  , encode_le64
-  , encode_outpoint
-  , encode_output
   , encode_witness
   , encode_funding_witness
 
     -- * Parsing
-  , DecodeError(..)
-  , RawTx(..)
-  , RawInput(..)
-  , RawOutput(..)
+  , BT.Tx(..)
+  , BT.TxIn(..)
+  , BT.TxOut(BT.TxOut)
+  , BT.from_bytes
   , decode_tx
-  , decode_varint
-  , decode_le32
-  , decode_le64
-  , decode_outpoint
-  , decode_output
-  , decode_witness
 
     -- * Validation
   , ValidationError(..)
@@ -278,6 +272,7 @@ module Lightning.Protocol.BOLT3 (
   , validate_htlc_fee
   ) where
 
+import qualified Bitcoin.Prim.Tx as BT
 import Lightning.Protocol.BOLT3.Types
 import Lightning.Protocol.BOLT3.Keys
 import Lightning.Protocol.BOLT3.Scripts

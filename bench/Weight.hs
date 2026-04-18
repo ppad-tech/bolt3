@@ -134,17 +134,6 @@ instance NFData ToSelfDelay where
 instance NFData CommitmentNumber where
   rnf (CommitmentNumber x) = rnf x
 
--- Parsing types
-instance NFData RawTx where
-  rnf (RawTx v i o w l) =
-    rnf v `seq` rnf i `seq` rnf o `seq` rnf w `seq` rnf l
-
-instance NFData RawInput where
-  rnf (RawInput o scr sq) = rnf o `seq` rnf scr `seq` rnf sq
-
-instance NFData RawOutput where
-  rnf (RawOutput v s) = rnf v `seq` rnf s
-
 -- Context types
 instance NFData CommitmentContext where
   rnf ctx = rnf (cc_funding_outpoint ctx) `seq`
@@ -166,14 +155,6 @@ instance NFData ClosingContext where
   rnf ctx = rnf (clc_funding_outpoint ctx) `seq`
             rnf (clc_local_amount ctx) `seq`
             rnf (clc_remote_amount ctx)
-
--- Error types
-instance NFData DecodeError where
-  rnf (InsufficientBytes e a) = rnf e `seq` rnf a
-  rnf (InvalidMarker w) = rnf w
-  rnf (InvalidFlag w) = rnf w
-  rnf InvalidVarint = ()
-  rnf EmptyInput = ()
 
 instance NFData ValidationError where
   rnf (InvalidVersion e a) = rnf e `seq` rnf a
@@ -266,11 +247,14 @@ main = mainWith $ do
 
   -- Serialization allocations
   func "encode_tx (0 htlcs)"
-       encode_tx (build_commitment_tx $ mkCommitmentContext htlcs0 noAnchors)
+       encode_tx (build_commitment_tx $
+                    mkCommitmentContext htlcs0 noAnchors)
   func "encode_tx (10 htlcs)"
-       encode_tx (build_commitment_tx $ mkCommitmentContext htlcs10 noAnchors)
+       encode_tx (build_commitment_tx $
+                    mkCommitmentContext htlcs10 noAnchors)
   func "encode_tx (100 htlcs)"
-       encode_tx (build_commitment_tx $ mkCommitmentContext htlcs100 noAnchors)
+       encode_tx (build_commitment_tx $
+                    mkCommitmentContext htlcs100 noAnchors)
   func "encode_htlc_tx"
        encode_htlc_tx (build_htlc_timeout_tx sampleHtlcContext)
   func "encode_closing_tx"
@@ -278,14 +262,11 @@ main = mainWith $ do
 
   -- Parsing allocations
   func "decode_tx (0 htlcs)"
-       decode_tx (encode_tx $ build_commitment_tx $
-                    mkCommitmentContext htlcs0 noAnchors)
+       decode_tx (encodeTx0 htlcs0 noAnchors)
   func "decode_tx (10 htlcs)"
-       decode_tx (encode_tx $ build_commitment_tx $
-                    mkCommitmentContext htlcs10 noAnchors)
+       decode_tx (encodeTx0 htlcs10 noAnchors)
   func "decode_tx (100 htlcs)"
-       decode_tx (encode_tx $ build_commitment_tx $
-                    mkCommitmentContext htlcs100 noAnchors)
+       decode_tx (encodeTx0 htlcs100 noAnchors)
 
   -- Validation allocations
   func "validate_commitment_tx (valid)"
@@ -371,6 +352,14 @@ main = mainWith $ do
        0xb7, 0xcf, 0xc8, 0x3b, 0xd5, 0x7b, 0x2e, 0x2c, 0x0d, 0x0d, 0xd2,
        0x5e, 0xaf, 0x46, 0x7a, 0x4a, 0x1c, 0x2a, 0x45, 0xce, 0x14, 0x86]
     samplePubkey3 = samplePubkey1
+
+    -- Helper to encode a commitment tx for decode benchmarks
+    encodeTx0 :: [HTLC] -> ChannelFeatures -> BS.ByteString
+    encodeTx0 htlcs features =
+      case encode_tx (build_commitment_tx
+             (mkCommitmentContext htlcs features)) of
+        Nothing -> BS.empty
+        Just bs -> bs
 
     -- Funding outpoint
     sampleFundingOutpoint :: OutPoint
