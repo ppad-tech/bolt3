@@ -1,6 +1,8 @@
 # ppad-bolt3
 
+[![](https://img.shields.io/hackage/v/ppad-bolt3?color=blue)](https://hackage.haskell.org/package/ppad-bolt3)
 ![](https://img.shields.io/badge/license-MIT-brightgreen)
+[![](https://img.shields.io/badge/haddock-bolt3-lightblue)](https://docs.ppad.tech/bolt3)
 
 A pure Haskell implementation of [BOLT #3][bolt3] (Lightning Network
 Bitcoin transaction and script formats), including commitment
@@ -48,10 +50,7 @@ Haddocks are hosted at [docs.ppad.tech/bolt3][hadoc].
 
 ## Security
 
-This library aims at the maximum security achievable in a
-garbage-collected language under an optimizing compiler such as GHC.
-If you discover any vulnerabilities, please disclose them via
-security@ppad.tech.
+This is a pre-release version and makes no security guarantees whatsoever.
 
 ## Development
 
