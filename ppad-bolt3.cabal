@@ -35,9 +35,9 @@ library
   build-depends:
       base >= 4.9 && < 5
     , bytestring >= 0.9 && < 0.13
-    , ppad-ripemd160
-    , ppad-secp256k1
-    , ppad-sha256
+    , ppad-ripemd160 >= 0.1.4 && < 0.2
+    , ppad-secp256k1 >= 0.5.4 && < 0.6
+    , ppad-sha256 >= 0.3.2 && < 0.4
 
 test-suite bolt3-tests
   type:                exitcode-stdio-1.0
