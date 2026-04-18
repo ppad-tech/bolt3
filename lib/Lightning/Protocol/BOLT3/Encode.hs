@@ -95,12 +95,13 @@ encode_varint !n
 --
 -- Format: 32 bytes txid (already LE in TxId) + 4 bytes output index LE
 --
--- >>> encode_outpoint (Outpoint txid 0)
+-- >>> encode_outpoint (OutPoint txid 0)
 -- <32-byte txid><4-byte index>
-encode_outpoint :: Outpoint -> BS.ByteString
+encode_outpoint :: OutPoint -> BS.ByteString
 encode_outpoint !op = BSL.toStrict $ BSB.toLazyByteString $
-  BSB.byteString (unTxId $ outpoint_txid op) <>
-  BSB.word32LE (outpoint_index op)
+  let !(TxId bs) = op_txid op
+  in  BSB.byteString bs <>
+      BSB.word32LE (op_vout op)
 {-# INLINE encode_outpoint #-}
 
 -- | Encode a transaction output.

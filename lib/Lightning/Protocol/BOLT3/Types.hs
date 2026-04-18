@@ -34,8 +34,8 @@ module Lightning.Protocol.BOLT3.Types (
 
     -- * Transaction primitives
   , TxId(..)
-  , txid
-  , Outpoint(..)
+  , mkTxId
+  , OutPoint(..)
   , Sequence(..)
   , Locktime(..)
 
@@ -71,8 +71,10 @@ module Lightning.Protocol.BOLT3.Types (
   , RevocationPubkey(..)
   , FundingPubkey(..)
 
-    -- * Script and witness
+    -- * Script
   , Script(..)
+
+    -- * Witness (re-exported from ppad-tx)
   , Witness(..)
 
     -- * Channel options
@@ -96,6 +98,7 @@ module Lightning.Protocol.BOLT3.Types (
   , anchor_output_value
   ) where
 
+import Bitcoin.Prim.Tx (TxId(..), mkTxId, OutPoint(..), Witness(..))
 import Data.Word (Word16, Word32, Word64)
 import qualified Data.ByteString as BS
 import GHC.Generics (Generic)
@@ -202,25 +205,6 @@ payment_preimage bs
 {-# INLINE payment_preimage #-}
 
 -- transaction primitives ------------------------------------------------------
-
--- | Transaction ID (32 bytes, little-endian hash).
-newtype TxId = TxId { unTxId :: BS.ByteString }
-  deriving (Eq, Ord, Show, Generic)
-
--- | Parse a 32-byte transaction ID.
---
--- Returns Nothing if the input is not exactly 32 bytes.
-txid :: BS.ByteString -> Maybe TxId
-txid bs
-  | BS.length bs == 32 = Just (TxId bs)
-  | otherwise = Nothing
-{-# INLINE txid #-}
-
--- | Transaction outpoint (txid + output index).
-data Outpoint = Outpoint
-  { outpoint_txid  :: {-# UNPACK #-} !TxId
-  , outpoint_index :: {-# UNPACK #-} !Word32
-  } deriving (Eq, Ord, Show, Generic)
 
 -- | Transaction input sequence number.
 newtype Sequence = Sequence { unSequence :: Word32 }
@@ -368,14 +352,10 @@ newtype RevocationPubkey = RevocationPubkey { unRevocationPubkey :: Pubkey }
 newtype FundingPubkey = FundingPubkey { unFundingPubkey :: Pubkey }
   deriving (Eq, Ord, Show, Generic)
 
--- script and witness ----------------------------------------------------------
+-- script ----------------------------------------------------------------------
 
 -- | Bitcoin script (serialized).
 newtype Script = Script { unScript :: BS.ByteString }
-  deriving (Eq, Ord, Show, Generic)
-
--- | Transaction witness stack.
-newtype Witness = Witness { unWitness :: [BS.ByteString] }
   deriving (Eq, Ord, Show, Generic)
 
 -- channel options -------------------------------------------------------------

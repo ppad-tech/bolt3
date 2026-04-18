@@ -61,7 +61,7 @@ data DecodeError
 
 -- | A raw transaction input as parsed from bytes.
 data RawInput = RawInput
-  { ri_outpoint   :: !Outpoint
+  { ri_outpoint   :: !OutPoint
   , ri_script_sig :: !BS.ByteString
   , ri_sequence   :: !Sequence
   } deriving (Eq, Show, Generic)
@@ -184,22 +184,22 @@ decode_varint_32 !bs
 --
 -- Format: 32 bytes txid (little-endian) + 4 bytes index (little-endian)
 --
--- >>> let txid = BS.replicate 32 0
+-- >>> let tid = BS.replicate 32 0
 -- >>> let idx = BS.pack [0x01, 0x00, 0x00, 0x00]
--- >>> decode_outpoint (txid <> idx)
--- Right (Outpoint {outpoint_txid = ..., outpoint_index = 1}, "")
+-- >>> decode_outpoint (tid <> idx)
+-- Right (OutPoint {op_txid = ..., op_vout = 1}, "")
 decode_outpoint
   :: BS.ByteString
-  -> Either DecodeError (Outpoint, BS.ByteString)
+  -> Either DecodeError (OutPoint, BS.ByteString)
 decode_outpoint !bs
   | BS.length bs < 36 = Left (InsufficientBytes 36 (BS.length bs))
   | otherwise =
-      let !txid = TxId (BS.take 32 bs)
+      let !tid = TxId (BS.take 32 bs)
           !rest1 = BS.drop 32 bs
       in case decode_le32 rest1 of
            Left err -> Left err
            Right (!idx, !rest2) ->
-             let !outpoint = Outpoint txid idx
+             let !outpoint = OutPoint tid idx
              in Right (outpoint, rest2)
 {-# INLINE decode_outpoint #-}
 

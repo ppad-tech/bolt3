@@ -99,7 +99,7 @@ data CommitmentKeys = CommitmentKeys
 
 -- | Context for building a commitment transaction.
 data CommitmentContext = CommitmentContext
-  { cc_funding_outpoint    :: !Outpoint
+  { cc_funding_outpoint    :: !OutPoint
   , cc_commitment_number   :: !CommitmentNumber
   , cc_local_payment_bp    :: !PaymentBasepoint
   , cc_remote_payment_bp   :: !PaymentBasepoint
@@ -118,7 +118,7 @@ data CommitmentContext = CommitmentContext
 data CommitmentTx = CommitmentTx
   { ctx_version            :: {-# UNPACK #-} !Word32
   , ctx_locktime           :: !Locktime
-  , ctx_input_outpoint     :: !Outpoint
+  , ctx_input_outpoint     :: !OutPoint
   , ctx_input_sequence     :: !Sequence
   , ctx_outputs            :: ![TxOutput]
   , ctx_funding_script     :: !Script
@@ -305,7 +305,7 @@ data HTLCContext = HTLCContext
 data HTLCTx = HTLCTx
   { htx_version            :: {-# UNPACK #-} !Word32
   , htx_locktime           :: !Locktime
-  , htx_input_outpoint     :: !Outpoint
+  , htx_input_outpoint     :: !OutPoint
   , htx_input_sequence     :: !Sequence
   , htx_output_value       :: !Satoshi
   , htx_output_script      :: !Script
@@ -328,7 +328,7 @@ build_htlc_tx_common ctx locktime fee =
       !inputSeq = if has_anchors (hc_features ctx)
                    then Sequence 1
                    else Sequence 0
-      !outpoint = Outpoint (hc_commitment_txid ctx) (hc_output_index ctx)
+      !outpoint = OutPoint (hc_commitment_txid ctx) (hc_output_index ctx)
       !outputScript = to_p2wsh $ htlc_output_script
         (hc_revocation_pubkey ctx)
         (hc_to_self_delay ctx)
@@ -370,7 +370,7 @@ build_htlc_success_tx ctx =
 
 -- | Context for building closing transactions.
 data ClosingContext = ClosingContext
-  { clc_funding_outpoint   :: !Outpoint
+  { clc_funding_outpoint   :: !OutPoint
   , clc_local_amount       :: !Satoshi
   , clc_remote_amount      :: !Satoshi
   , clc_local_script       :: !Script
@@ -387,7 +387,7 @@ data ClosingContext = ClosingContext
 data ClosingTx = ClosingTx
   { cltx_version           :: {-# UNPACK #-} !Word32
   , cltx_locktime          :: !Locktime
-  , cltx_input_outpoint    :: !Outpoint
+  , cltx_input_outpoint    :: !OutPoint
   , cltx_input_sequence    :: !Sequence
   , cltx_outputs           :: ![TxOutput]
   , cltx_funding_script    :: !Script

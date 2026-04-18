@@ -77,8 +77,8 @@ module Lightning.Protocol.BOLT3 (
 
     -- ** Transaction primitives
   , TxId(..)
-  , txid
-  , Outpoint(..)
+  , mkTxId
+  , OutPoint(..)
   , Sequence(..)
   , Locktime(..)
 
