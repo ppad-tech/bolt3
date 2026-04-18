@@ -136,6 +136,40 @@
         "url": "git://git.ppad.tech/base16.git"
       }
     },
+    "ppad-base16_4": {
+      "inputs": {
+        "flake-utils": [
+          "ppad-tx",
+          "ppad-base16",
+          "ppad-nixpkgs",
+          "flake-utils"
+        ],
+        "nixpkgs": [
+          "ppad-tx",
+          "ppad-base16",
+          "ppad-nixpkgs",
+          "nixpkgs"
+        ],
+        "ppad-nixpkgs": [
+          "ppad-tx",
+          "ppad-nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1766934151,
+        "narHash": "sha256-BUFpuLfrGXE2xi3Wa9TYCEhhRhFp175Ghxnr0JRbG2I=",
+        "ref": "master",
+        "rev": "58dfb7922401a60d5de76825fcd5f6ecbcd7afe0",
+        "revCount": 26,
+        "type": "git",
+        "url": "git://git.ppad.tech/base16.git"
+      },
+      "original": {
+        "ref": "master",
+        "type": "git",
+        "url": "git://git.ppad.tech/base16.git"
+      }
+    },
     "ppad-fixed": {
       "inputs": {
         "flake-utils": [
@@ -375,6 +409,41 @@
         "url": "git://git.ppad.tech/sha512.git"
       }
     },
+    "ppad-tx": {
+      "inputs": {
+        "flake-utils": [
+          "ppad-tx",
+          "ppad-nixpkgs",
+          "flake-utils"
+        ],
+        "nixpkgs": [
+          "ppad-tx",
+          "ppad-nixpkgs",
+          "nixpkgs"
+        ],
+        "ppad-base16": "ppad-base16_4",
+        "ppad-nixpkgs": [
+          "ppad-nixpkgs"
+        ],
+        "ppad-sha256": [
+          "ppad-sha256"
+        ]
+      },
+      "locked": {
+        "lastModified": 1776515759,
+        "narHash": "sha256-yRHrY3d3tL8ZM1dWKPYvaz7H3YsPtM8vd2ZwJKL2/nQ=",
+        "ref": "master",
+        "rev": "6e22072caac8c1db991c2640fcb795afba8c294a",
+        "revCount": 20,
+        "type": "git",
+        "url": "git://git.ppad.tech/tx.git"
+      },
+      "original": {
+        "ref": "master",
+        "type": "git",
+        "url": "git://git.ppad.tech/tx.git"
+      }
+    },
     "root": {
       "inputs": {
         "flake-utils": [
@@ -388,7 +457,8 @@
         "ppad-nixpkgs": "ppad-nixpkgs",
         "ppad-ripemd160": "ppad-ripemd160",
         "ppad-secp256k1": "ppad-secp256k1",
-        "ppad-sha256": "ppad-sha256"
+        "ppad-sha256": "ppad-sha256",
+        "ppad-tx": "ppad-tx"
       }
     },
     "systems": {

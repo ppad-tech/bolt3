@@ -121,20 +121,12 @@ instance NFData OutputType where
 instance NFData Script where
   rnf (Script bs) = rnf bs
 
-instance NFData Witness where
-  rnf (Witness items) = rnf items
-
-instance NFData OutPoint where
-  rnf (OutPoint t i) = rnf t `seq` rnf i
 
 instance NFData Sequence where
   rnf (Sequence x) = rnf x
 
 instance NFData Locktime where
   rnf (Locktime x) = rnf x
-
-instance NFData TxId where
-  rnf (TxId bs) = rnf bs
 
 instance NFData ToSelfDelay where
   rnf (ToSelfDelay x) = rnf x
