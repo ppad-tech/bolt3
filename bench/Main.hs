@@ -87,8 +87,8 @@ instance NFData Script where
 instance NFData Witness where
   rnf (Witness items) = rnf items
 
-instance NFData Outpoint where
-  rnf (Outpoint t i) = rnf t `seq` rnf i
+instance NFData OutPoint where
+  rnf (OutPoint t i) = rnf t `seq` rnf i
 
 instance NFData Sequence where
   rnf (Sequence x) = rnf x
@@ -390,8 +390,8 @@ main = defaultMain [
     samplePubkey3 = samplePubkey1
 
     -- Funding outpoint
-    sampleFundingOutpoint :: Outpoint
-    sampleFundingOutpoint = Outpoint (TxId $ BS.replicate 32 0x01) 0
+    sampleFundingOutpoint :: OutPoint
+    sampleFundingOutpoint = OutPoint (TxId $ BS.replicate 32 0x01) 0
 
     -- HTLC lists
     mkHtlc :: HTLCDirection -> Word64 -> Word64 -> HTLC

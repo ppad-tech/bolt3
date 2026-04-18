@@ -300,12 +300,12 @@ smartConstructorTests = testGroup "validation" [
   , testCase "seckey rejects 33 bytes" $ do
       let bs = BS.replicate 33 0x01
       isNothing (seckey bs) @?= True
-  , testCase "txid accepts 32 bytes" $ do
+  , testCase "mkTxId accepts 32 bytes" $ do
       let bs = BS.replicate 32 0x00
-      isJust (txid bs) @?= True
-  , testCase "txid rejects 31 bytes" $ do
+      isJust (mkTxId bs) @?= True
+  , testCase "mkTxId rejects 31 bytes" $ do
       let bs = BS.replicate 31 0x00
-      isNothing (txid bs) @?= True
+      isNothing (mkTxId bs) @?= True
   , testCase "payment_hash accepts 32 bytes" $ do
       let bs = BS.replicate 32 0xab
       isJust (payment_hash bs) @?= True
