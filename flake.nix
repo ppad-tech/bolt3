@@ -7,6 +7,12 @@
       url  = "git://git.ppad.tech/nixpkgs.git";
       ref  = "master";
     };
+    ppad-bolt1 = {
+      type = "git";
+      url  = "git://git.ppad.tech/bolt1.git";
+      ref  = "master";
+      inputs.ppad-nixpkgs.follows = "ppad-nixpkgs";
+    };
     ppad-sha256 = {
       type = "git";
       url  = "git://git.ppad.tech/sha256.git";
@@ -38,8 +44,8 @@
   };
 
   outputs = { self, nixpkgs, flake-utils, ppad-nixpkgs
-            , ppad-sha256, ppad-secp256k1, ppad-ripemd160
-            , ppad-tx }:
+            , ppad-bolt1, ppad-sha256, ppad-secp256k1
+            , ppad-ripemd160, ppad-tx }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         lib = "ppad-bolt3";
@@ -67,9 +73,11 @@
             (hlib.enableCabalFlag ripemd160 "llvm")
             [ llvm clang ];
 
+        bolt1 = ppad-bolt1.packages.${system}.default;
         tx = ppad-tx.packages.${system}.default;
 
         hpkgs = pkgs.haskell.packages.ghc910.extend (new: old: {
+          ppad-bolt1 = bolt1;
           ppad-sha256 = sha256-llvm;
           ppad-secp256k1 = secp256k1-llvm;
           ppad-ripemd160 = ripemd160-llvm;
