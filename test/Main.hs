@@ -306,24 +306,24 @@ smartConstructorTests = testGroup "validation" [
   , testCase "mkTxId rejects 31 bytes" $ do
       let bs = BS.replicate 31 0x00
       isNothing (mkTxId bs) @?= True
-  , testCase "payment_hash accepts 32 bytes" $ do
+  , testCase "paymentHash accepts 32 bytes" $ do
       let bs = BS.replicate 32 0xab
-      isJust (payment_hash bs) @?= True
-  , testCase "payment_hash rejects 33 bytes" $ do
+      isJust (paymentHash bs) @?= True
+  , testCase "paymentHash rejects 33 bytes" $ do
       let bs = BS.replicate 33 0xab
-      isNothing (payment_hash bs) @?= True
-  , testCase "payment_preimage accepts 32 bytes" $ do
+      isNothing (paymentHash bs) @?= True
+  , testCase "paymentPreimage accepts 32 bytes" $ do
       let bs = BS.replicate 32 0xcd
-      isJust (payment_preimage bs) @?= True
-  , testCase "payment_preimage rejects 31 bytes" $ do
+      isJust (paymentPreimage bs) @?= True
+  , testCase "paymentPreimage rejects 31 bytes" $ do
       let bs = BS.replicate 31 0xcd
-      isNothing (payment_preimage bs) @?= True
-  , testCase "per_commitment_secret accepts 32 bytes" $ do
+      isNothing (paymentPreimage bs) @?= True
+  , testCase "perCommitmentSecret accepts 32 bytes" $ do
       let bs = BS.replicate 32 0xef
-      isJust (per_commitment_secret bs) @?= True
-  , testCase "per_commitment_secret rejects 33 bytes" $ do
+      isJust (perCommitmentSecret bs) @?= True
+  , testCase "perCommitmentSecret rejects 33 bytes" $ do
       let bs = BS.replicate 33 0xef
-      isNothing (per_commitment_secret bs) @?= True
+      isNothing (perCommitmentSecret bs) @?= True
 
     -- 48-bit commitment number
   , testCase "commitment_number accepts 0" $ do

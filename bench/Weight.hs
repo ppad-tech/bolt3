@@ -10,20 +10,11 @@ import Lightning.Protocol.BOLT3
 import Weigh
 
 -- NFData instances for weigh
+-- (Satoshi, MilliSatoshi, Point, PaymentHash, PerCommitmentSecret
+-- derive NFData via ppad-bolt1)
 
--- Monetary types
-instance NFData Satoshi where
-  rnf (Satoshi x) = rnf x
-
-instance NFData MilliSatoshi where
-  rnf (MilliSatoshi x) = rnf x
-
--- Key types
 instance NFData Pubkey where
   rnf (Pubkey x) = rnf x
-
-instance NFData Point where
-  rnf (Point x) = rnf x
 
 instance NFData PerCommitmentPoint where
   rnf (PerCommitmentPoint x) = rnf x
@@ -64,9 +55,6 @@ instance NFData HtlcBasepoint where
 instance NFData FundingPubkey where
   rnf (FundingPubkey p) = rnf p
 
-instance NFData PerCommitmentSecret where
-  rnf (PerCommitmentSecret bs) = rnf bs
-
 -- Channel features
 instance NFData ChannelFeatures where
   rnf (ChannelFeatures x) = rnf x
@@ -78,9 +66,6 @@ instance NFData DustLimit where
   rnf (DustLimit x) = rnf x
 
 -- Hash types
-instance NFData PaymentHash where
-  rnf (PaymentHash x) = rnf x
-
 instance NFData CltvExpiry where
   rnf (CltvExpiry x) = rnf x
 

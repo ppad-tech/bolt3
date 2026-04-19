@@ -10,19 +10,11 @@ import qualified Data.ByteString as BS
 import Lightning.Protocol.BOLT3
 
 -- NFData instances for benchmarking
-
--- Existing instances
-instance NFData Satoshi where
-  rnf (Satoshi x) = rnf x
-
-instance NFData MilliSatoshi where
-  rnf (MilliSatoshi x) = rnf x
+-- (Satoshi, MilliSatoshi, Point, PaymentHash, PerCommitmentSecret
+-- derive NFData via ppad-bolt1)
 
 instance NFData Pubkey where
   rnf (Pubkey x) = rnf x
-
-instance NFData Point where
-  rnf (Point x) = rnf x
 
 instance NFData PerCommitmentPoint where
   rnf (PerCommitmentPoint x) = rnf x
@@ -41,9 +33,6 @@ instance NFData FeeratePerKw where
 
 instance NFData DustLimit where
   rnf (DustLimit x) = rnf x
-
-instance NFData PaymentHash where
-  rnf (PaymentHash x) = rnf x
 
 instance NFData CltvExpiry where
   rnf (CltvExpiry x) = rnf x
@@ -149,9 +138,6 @@ instance NFData HtlcBasepoint where
 
 instance NFData FundingPubkey where
   rnf (FundingPubkey p) = rnf p
-
-instance NFData PerCommitmentSecret where
-  rnf (PerCommitmentSecret bs) = rnf bs
 
 -- Secret storage (SecretStore is a newtype over list)
 instance NFData SecretStore where
