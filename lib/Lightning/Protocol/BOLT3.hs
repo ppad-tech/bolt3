@@ -58,8 +58,8 @@ module Lightning.Protocol.BOLT3 (
     -- ** Monetary amounts
     Satoshi(..)
   , MilliSatoshi(..)
-  , msat_to_sat
-  , sat_to_msat
+  , msatToSat
+  , satToMsat
 
     -- ** Keys and points
   , Pubkey(..)
@@ -71,9 +71,9 @@ module Lightning.Protocol.BOLT3 (
 
     -- ** Hashes
   , PaymentHash(..)
-  , payment_hash
+  , paymentHash
   , PaymentPreimage(..)
-  , payment_preimage
+  , paymentPreimage
 
     -- ** Transaction primitives
   , TxId(..)
@@ -98,7 +98,7 @@ module Lightning.Protocol.BOLT3 (
   , Basepoints(..)
   , PerCommitmentPoint(..)
   , PerCommitmentSecret(..)
-  , per_commitment_secret
+  , perCommitmentSecret
   , RevocationBasepoint(..)
   , PaymentBasepoint(..)
   , DelayedPaymentBasepoint(..)

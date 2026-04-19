@@ -12,11 +12,11 @@
 -- Core types for BOLT #3 transaction and script formats.
 
 module Lightning.Protocol.BOLT3.Types (
-    -- * Monetary amounts
+    -- * Monetary amounts (re-exported from BOLT1)
     Satoshi(..)
   , MilliSatoshi(..)
-  , msat_to_sat
-  , sat_to_msat
+  , msatToSat
+  , satToMsat
 
     -- * Keys and points
   , Pubkey(..)
@@ -26,11 +26,11 @@ module Lightning.Protocol.BOLT3.Types (
   , Point(..)
   , point
 
-    -- * Hashes
+    -- * Hashes (re-exported from BOLT1)
   , PaymentHash(..)
-  , payment_hash
+  , paymentHash
   , PaymentPreimage(..)
-  , payment_preimage
+  , paymentPreimage
 
     -- * Transaction primitives
   , TxId(..)
@@ -55,7 +55,7 @@ module Lightning.Protocol.BOLT3.Types (
   , Basepoints(..)
   , PerCommitmentPoint(..)
   , PerCommitmentSecret(..)
-  , per_commitment_secret
+  , perCommitmentSecret
   , RevocationBasepoint(..)
   , PaymentBasepoint(..)
   , DelayedPaymentBasepoint(..)
@@ -102,26 +102,14 @@ import Bitcoin.Prim.Tx (TxId(..), mkTxId, OutPoint(..), Witness(..))
 import Data.Word (Word16, Word32, Word64)
 import qualified Data.ByteString as BS
 import GHC.Generics (Generic)
-
--- monetary amounts ------------------------------------------------------------
-
--- | Amount in satoshis.
-newtype Satoshi = Satoshi { unSatoshi :: Word64 }
-  deriving (Eq, Ord, Show, Generic, Num)
-
--- | Amount in millisatoshis.
-newtype MilliSatoshi = MilliSatoshi { unMilliSatoshi :: Word64 }
-  deriving (Eq, Ord, Show, Generic, Num)
-
--- | Convert millisatoshis to satoshis (rounds down).
-msat_to_sat :: MilliSatoshi -> Satoshi
-msat_to_sat (MilliSatoshi m) = Satoshi (m `div` 1000)
-{-# INLINE msat_to_sat #-}
-
--- | Convert satoshis to millisatoshis.
-sat_to_msat :: Satoshi -> MilliSatoshi
-sat_to_msat (Satoshi s) = MilliSatoshi (s * 1000)
-{-# INLINE sat_to_msat #-}
+import Lightning.Protocol.BOLT1.Prim
+  ( Satoshi(..), MilliSatoshi(..)
+  , satToMsat, msatToSat
+  , Point(..), point
+  , PaymentHash(..), paymentHash
+  , PaymentPreimage(..), paymentPreimage
+  , PerCommitmentSecret(..), perCommitmentSecret
+  )
 
 -- keys and points -------------------------------------------------------------
 
@@ -160,50 +148,6 @@ seckey bs
   | otherwise = Nothing
 {-# INLINE seckey #-}
 
--- | Elliptic curve point (33-byte compressed form).
-newtype Point = Point { unPoint :: BS.ByteString }
-  deriving (Eq, Ord, Show, Generic)
-
--- | Parse a 33-byte elliptic curve point.
---
--- Returns Nothing if the input is not exactly 33 bytes.
-point :: BS.ByteString -> Maybe Point
-point bs
-  | BS.length bs == 33 = Just (Point bs)
-  | otherwise = Nothing
-{-# INLINE point #-}
-
--- hashes ----------------------------------------------------------------------
-
--- | Payment hash (32 bytes, SHA256 of preimage).
-newtype PaymentHash = PaymentHash { unPaymentHash :: BS.ByteString }
-  deriving (Eq, Ord, Show, Generic)
-
--- | Parse a 32-byte payment hash.
---
--- Returns Nothing if the input is not exactly 32 bytes.
-payment_hash :: BS.ByteString -> Maybe PaymentHash
-payment_hash bs
-  | BS.length bs == 32 = Just (PaymentHash bs)
-  | otherwise = Nothing
-{-# INLINE payment_hash #-}
-
--- | Payment preimage (32 bytes).
-newtype PaymentPreimage = PaymentPreimage { unPaymentPreimage :: BS.ByteString }
-  deriving (Eq, Generic)
-
-instance Show PaymentPreimage where
-  show _ = "PaymentPreimage <redacted>"
-
--- | Parse a 32-byte payment preimage.
---
--- Returns Nothing if the input is not exactly 32 bytes.
-payment_preimage :: BS.ByteString -> Maybe PaymentPreimage
-payment_preimage bs
-  | BS.length bs == 32 = Just (PaymentPreimage bs)
-  | otherwise = Nothing
-{-# INLINE payment_preimage #-}
-
 -- transaction primitives ------------------------------------------------------
 
 -- | Transaction input sequence number.
@@ -217,7 +161,8 @@ newtype Locktime = Locktime { unLocktime :: Word32 }
 -- channel parameters ----------------------------------------------------------
 
 -- | 48-bit commitment number.
-newtype CommitmentNumber = CommitmentNumber { unCommitmentNumber :: Word64 }
+newtype CommitmentNumber = CommitmentNumber
+  { unCommitmentNumber :: Word64 }
   deriving (Eq, Ord, Show, Generic, Num)
 
 -- | Parse a 48-bit commitment number.
@@ -254,11 +199,6 @@ data HTLCDirection
   deriving (Eq, Ord, Show, Generic)
 
 -- | HTLC output details.
---
--- NOTE: No Ord instance is provided. BOLT #3 requires output ordering by
--- amount then scriptPubKey, but scriptPubKey depends on derived keys which
--- are not available here. Use 'sort_outputs' in Tx module for proper BIP69
--- output ordering.
 data HTLC = HTLC
   { htlc_direction    :: !HTLCDirection
   , htlc_amount_msat  :: {-# UNPACK #-} !MilliSatoshi
@@ -269,25 +209,9 @@ data HTLC = HTLC
 -- basepoints ------------------------------------------------------------------
 
 -- | Per-commitment point (used to derive keys).
-newtype PerCommitmentPoint = PerCommitmentPoint { unPerCommitmentPoint :: Point }
+newtype PerCommitmentPoint = PerCommitmentPoint
+  { unPerCommitmentPoint :: Point }
   deriving (Eq, Ord, Show, Generic)
-
--- | Per-commitment secret (32 bytes).
-newtype PerCommitmentSecret = PerCommitmentSecret
-  { unPerCommitmentSecret :: BS.ByteString }
-  deriving (Eq, Generic)
-
-instance Show PerCommitmentSecret where
-  show _ = "PerCommitmentSecret <redacted>"
-
--- | Parse a 32-byte per-commitment secret.
---
--- Returns Nothing if the input is not exactly 32 bytes.
-per_commitment_secret :: BS.ByteString -> Maybe PerCommitmentSecret
-per_commitment_secret bs
-  | BS.length bs == 32 = Just (PerCommitmentSecret bs)
-  | otherwise = Nothing
-{-# INLINE per_commitment_secret #-}
 
 -- | Revocation basepoint.
 newtype RevocationBasepoint = RevocationBasepoint
@@ -305,7 +229,8 @@ newtype DelayedPaymentBasepoint = DelayedPaymentBasepoint
   deriving (Eq, Ord, Show, Generic)
 
 -- | HTLC basepoint.
-newtype HtlcBasepoint = HtlcBasepoint { unHtlcBasepoint :: Point }
+newtype HtlcBasepoint = HtlcBasepoint
+  { unHtlcBasepoint :: Point }
   deriving (Eq, Ord, Show, Generic)
 
 -- | Collection of all basepoints for one party.
@@ -318,12 +243,13 @@ data Basepoints = Basepoints
 
 -- derived keys ----------------------------------------------------------------
 
--- | Local pubkey (derived from payment_basepoint + per_commitment_point).
+-- | Local pubkey.
 newtype LocalPubkey = LocalPubkey { unLocalPubkey :: Pubkey }
   deriving (Eq, Ord, Show, Generic)
 
--- | Remote pubkey (simply the remote's payment_basepoint).
-newtype RemotePubkey = RemotePubkey { unRemotePubkey :: Pubkey }
+-- | Remote pubkey.
+newtype RemotePubkey = RemotePubkey
+  { unRemotePubkey :: Pubkey }
   deriving (Eq, Ord, Show, Generic)
 
 -- | Local delayed pubkey.
@@ -337,19 +263,23 @@ newtype RemoteDelayedPubkey = RemoteDelayedPubkey
   deriving (Eq, Ord, Show, Generic)
 
 -- | Local HTLC pubkey.
-newtype LocalHtlcPubkey = LocalHtlcPubkey { unLocalHtlcPubkey :: Pubkey }
+newtype LocalHtlcPubkey = LocalHtlcPubkey
+  { unLocalHtlcPubkey :: Pubkey }
   deriving (Eq, Ord, Show, Generic)
 
 -- | Remote HTLC pubkey.
-newtype RemoteHtlcPubkey = RemoteHtlcPubkey { unRemoteHtlcPubkey :: Pubkey }
+newtype RemoteHtlcPubkey = RemoteHtlcPubkey
+  { unRemoteHtlcPubkey :: Pubkey }
   deriving (Eq, Ord, Show, Generic)
 
--- | Revocation pubkey (derived from revocation_basepoint + per_commitment).
-newtype RevocationPubkey = RevocationPubkey { unRevocationPubkey :: Pubkey }
+-- | Revocation pubkey.
+newtype RevocationPubkey = RevocationPubkey
+  { unRevocationPubkey :: Pubkey }
   deriving (Eq, Ord, Show, Generic)
 
 -- | Funding pubkey (used in 2-of-2 multisig).
-newtype FundingPubkey = FundingPubkey { unFundingPubkey :: Pubkey }
+newtype FundingPubkey = FundingPubkey
+  { unFundingPubkey :: Pubkey }
   deriving (Eq, Ord, Show, Generic)
 
 -- script ----------------------------------------------------------------------

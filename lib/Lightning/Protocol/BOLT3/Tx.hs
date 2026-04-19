@@ -187,17 +187,17 @@ build_commitment_tx ctx =
       !totalDeduction = baseFee + anchorCost
       !(toLocalSat, toRemoteSat) = if cc_is_funder ctx
         then
-          let !local = msat_to_sat (cc_to_local_msat ctx)
+          let !local = msatToSat (cc_to_local_msat ctx)
               !deducted = if unSatoshi local >= unSatoshi totalDeduction
                           then Satoshi (unSatoshi local - unSatoshi totalDeduction)
                           else Satoshi 0
-          in (deducted, msat_to_sat (cc_to_remote_msat ctx))
+          in (deducted, msatToSat (cc_to_remote_msat ctx))
         else
-          let !remote = msat_to_sat (cc_to_remote_msat ctx)
+          let !remote = msatToSat (cc_to_remote_msat ctx)
               !deducted = if unSatoshi remote >= unSatoshi totalDeduction
                           then Satoshi (unSatoshi remote - unSatoshi totalDeduction)
                           else Satoshi 0
-          in (msat_to_sat (cc_to_local_msat ctx), deducted)
+          in (msatToSat (cc_to_local_msat ctx), deducted)
 
       !dustLimit = unDustLimit (cc_dust_limit ctx)
 
@@ -271,7 +271,7 @@ build_commitment_tx ctx =
 -- | Build an HTLC output for commitment transaction.
 htlcOutput :: CommitmentContext -> HTLC -> TxOutput
 htlcOutput ctx htlc =
-  let !amountSat = msat_to_sat (htlc_amount_msat htlc)
+  let !amountSat = msatToSat (htlc_amount_msat htlc)
       !keys = cc_keys ctx
       !features = cc_features ctx
       !expiry = htlc_cltv_expiry htlc
@@ -329,7 +329,7 @@ build_htlc_tx_common
   -> Satoshi            -- ^ Fee to subtract from output
   -> HTLCTx
 build_htlc_tx_common ctx locktime fee =
-  let !amountSat = msat_to_sat (htlc_amount_msat $ hc_htlc ctx)
+  let !amountSat = msatToSat (htlc_amount_msat $ hc_htlc ctx)
       !outputValue = if unSatoshi amountSat >= unSatoshi fee
                      then Satoshi (unSatoshi amountSat - unSatoshi fee)
                      else Satoshi 0
@@ -540,7 +540,7 @@ is_trimmed :: DustLimit -> FeeratePerKw -> ChannelFeatures -> HTLC -> Bool
 is_trimmed dust feerate features htlc =
   let !threshold = htlc_trim_threshold dust feerate features
                      (htlc_direction htlc)
-      !amountSat = msat_to_sat (htlc_amount_msat htlc)
+      !amountSat = msatToSat (htlc_amount_msat htlc)
   in unSatoshi amountSat < unSatoshi threshold
 {-# INLINE is_trimmed #-}
 
