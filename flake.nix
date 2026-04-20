@@ -74,14 +74,23 @@
             [ llvm clang ];
 
         bolt1 = ppad-bolt1.packages.${system}.default;
+        bolt1-llvm =
+          hlib.addBuildTools
+            (hlib.enableCabalFlag bolt1 "llvm")
+            [ llvm clang ];
+
         tx = ppad-tx.packages.${system}.default;
+        tx-llvm =
+          hlib.addBuildTools
+            (hlib.enableCabalFlag tx "llvm")
+            [ llvm clang ];
 
         hpkgs = pkgs.haskell.packages.ghc910.extend (new: old: {
-          ppad-bolt1 = bolt1;
+          ppad-bolt1 = bolt1-llvm;
           ppad-sha256 = sha256-llvm;
           ppad-secp256k1 = secp256k1-llvm;
           ppad-ripemd160 = ripemd160-llvm;
-          ppad-tx = tx;
+          ppad-tx = tx-llvm;
           ${lib} = new.callCabal2nix lib ./. { };
         });
 
