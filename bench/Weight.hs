@@ -7,6 +7,11 @@ import Control.DeepSeq (NFData(..))
 import qualified Data.ByteString as BS
 import Data.Word (Word32, Word64)
 import Lightning.Protocol.BOLT3
+import Lightning.Protocol.BOLT3.Types
+  ( Pubkey(..), Point(..)
+  , PaymentHash(..), PerCommitmentPoint(..)
+  , CommitmentNumber(..)
+  )
 import Weigh
 
 -- NFData instances for weigh

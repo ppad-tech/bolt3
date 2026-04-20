@@ -8,6 +8,10 @@ import Data.Maybe (isJust, isNothing)
 import Test.Tasty
 import Test.Tasty.HUnit
 import Lightning.Protocol.BOLT3
+import Lightning.Protocol.BOLT3.Types
+  ( Pubkey(..), Point(..)
+  , PaymentHash(..), PerCommitmentPoint(..)
+  )
 
 main :: IO ()
 main = defaultMain $ testGroup "ppad-bolt3" [

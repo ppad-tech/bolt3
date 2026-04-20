@@ -27,6 +27,7 @@ library
       Lightning.Protocol.BOLT3
       Lightning.Protocol.BOLT3.Decode
       Lightning.Protocol.BOLT3.Encode
+      Lightning.Protocol.BOLT3.Internal
       Lightning.Protocol.BOLT3.Keys
       Lightning.Protocol.BOLT3.Scripts
       Lightning.Protocol.BOLT3.Tx

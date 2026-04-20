@@ -24,12 +24,15 @@ module Lightning.Protocol.BOLT3.Types (
   , seckey
   , Point(..)
   , point
+  , unPoint
 
     -- * Hashes (re-exported from BOLT1)
   , PaymentHash(..)
   , paymentHash
+  , unPaymentHash
   , PaymentPreimage(..)
   , paymentPreimage
+  , unPaymentPreimage
 
     -- * Transaction primitives
   , TxId(..)
@@ -56,6 +59,7 @@ module Lightning.Protocol.BOLT3.Types (
   , PerCommitmentPoint(..)
   , PerCommitmentSecret(..)
   , perCommitmentSecret
+  , unPerCommitmentSecret
   , RevocationBasepoint(..)
   , PaymentBasepoint(..)
   , DelayedPaymentBasepoint(..)
@@ -105,10 +109,11 @@ import GHC.Generics (Generic)
 import Lightning.Protocol.BOLT1.Prim
   ( Satoshi(..), MilliSatoshi(..)
   , satToMsat, msatToSat
-  , Point(..), point
-  , PaymentHash(..), paymentHash
-  , PaymentPreimage(..), paymentPreimage
+  , Point(..), point, unPoint
+  , PaymentHash(..), paymentHash, unPaymentHash
+  , PaymentPreimage(..), paymentPreimage, unPaymentPreimage
   , PerCommitmentSecret(..), perCommitmentSecret
+  , unPerCommitmentSecret
   )
 
 -- keys and points -------------------------------------------------------------
