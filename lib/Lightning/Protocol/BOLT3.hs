@@ -103,8 +103,7 @@ module Lightning.Protocol.BOLT3 (
 
     -- ** Basepoints
   , Basepoints(..)
-  , PerCommitmentPoint
-  , unPerCommitmentPoint
+  , PerCommitmentPoint(..)
   , PerCommitmentSecret
   , unPerCommitmentSecret
   , perCommitmentSecret
