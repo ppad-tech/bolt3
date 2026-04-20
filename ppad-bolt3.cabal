@@ -56,8 +56,10 @@ test-suite bolt3-tests
     , base16-bytestring
     , bytestring
     , ppad-bolt3
+    , QuickCheck
     , tasty
     , tasty-hunit
+    , tasty-quickcheck
 
 benchmark bolt3-bench
   type:                exitcode-stdio-1.0

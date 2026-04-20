@@ -5,8 +5,10 @@ module Main where
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base16 as B16
 import Data.Maybe (isJust, isNothing)
+import Data.Word (Word32, Word64)
 import Test.Tasty
 import Test.Tasty.HUnit
+import Test.Tasty.QuickCheck
 import Lightning.Protocol.BOLT3
 import Lightning.Protocol.BOLT3.Types
   ( Pubkey(..), Point(..)
@@ -32,6 +34,9 @@ main = defaultMain $ testGroup "ppad-bolt3" [
     ]
   , testGroup "Smart constructors" [
       smartConstructorTests
+    ]
+  , testGroup "Properties" [
+      propertyTests
     ]
   ]
 
@@ -359,3 +364,93 @@ smartConstructorTests = testGroup "validation" [
         Just cn ->
           isNothing (next_commitment_number cn) @?= True
   ]
+
+-- Property tests -------------------------------------------------------
+
+-- | Maximum valid commitment number (2^48 - 1).
+maxCommitNum :: Word64
+maxCommitNum = 281474976710655
+
+propertyTests :: TestTree
+propertyTests = testGroup "invariants" [
+    testProperty "commitment_number validates 48-bit"
+      propCommitmentNumberRange
+  , testProperty "next_commitment_number stays valid"
+      propNextCommitmentNumber
+  , testProperty "trimmed/untrimmed partition"
+      propTrimPartition
+  , testProperty "commitment_fee increases with HTLCs"
+      propFeeMonotonic
+  ]
+
+-- | commitment_number accepts values in [0, 2^48-1] and
+--   rejects values >= 2^48.
+propCommitmentNumberRange :: Property
+propCommitmentNumberRange =
+  forAll (choose (0, maxBound)) $ \n ->
+    case commitment_number n of
+      Just cn -> n <= maxCommitNum
+        && unCommitmentNumber cn == n
+      Nothing -> n > maxCommitNum
+
+-- | If cn is a valid commitment number below the max,
+--   next_commitment_number yields a valid successor.
+propNextCommitmentNumber :: Property
+propNextCommitmentNumber =
+  forAll (choose (0, maxCommitNum)) $ \n ->
+    case commitment_number n of
+      Nothing -> False
+      Just cn
+        | n < maxCommitNum ->
+          case next_commitment_number cn of
+            Nothing -> False
+            Just cn' ->
+              unCommitmentNumber cn' == n + 1
+        | otherwise ->
+          isNothing (next_commitment_number cn)
+
+-- | trimmed_htlcs and untrimmed_htlcs partition the
+--   input list: every HTLC is in exactly one set and
+--   trimmed HTLCs have amount below the threshold.
+propTrimPartition :: Property
+propTrimPartition =
+  forAll (choose (1 :: Word32, 50000)) $ \feeW ->
+  forAll (choose (1, 20)) $ \numHtlcs ->
+  forAll (vectorOf numHtlcs genHTLC) $ \htlcs ->
+    let dust = DustLimit (Satoshi 546)
+        feerate = FeeratePerKw feeW
+        features = ChannelFeatures
+          { cf_option_anchors = False }
+        trimmed = trimmed_htlcs
+          dust feerate features htlcs
+        untrimmed = untrimmed_htlcs
+          dust feerate features htlcs
+    in length trimmed + length untrimmed
+         == length htlcs
+
+-- | commitment_fee is monotonically non-decreasing in
+--   the number of HTLCs.
+propFeeMonotonic :: Property
+propFeeMonotonic =
+  forAll (choose (1 :: Word32, 50000)) $ \feeW ->
+  forAll (choose (0, 100)) $ \n ->
+    let feerate = FeeratePerKw feeW
+        features = ChannelFeatures
+          { cf_option_anchors = False }
+        fee0 = commitment_fee feerate features n
+        fee1 = commitment_fee feerate features (n + 1)
+    in fee1 >= fee0
+
+-- | Generate a random HTLC.
+genHTLC :: Gen HTLC
+genHTLC = do
+  dir <- elements [HTLCOffered, HTLCReceived]
+  amt <- choose (0, 10000000)
+  cltv <- choose (0, 1000000)
+  pure HTLC
+    { htlc_direction = dir
+    , htlc_amount_msat = MilliSatoshi amt
+    , htlc_payment_hash = PaymentHash
+        (BS.replicate 32 0x00)
+    , htlc_cltv_expiry = CltvExpiry cltv
+    }
