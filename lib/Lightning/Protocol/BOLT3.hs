@@ -62,17 +62,22 @@ module Lightning.Protocol.BOLT3 (
   , satToMsat
 
     -- ** Keys and points
-  , Pubkey(..)
+  , Pubkey
+  , unPubkey
   , pubkey
-  , Seckey(..)
+  , Seckey
+  , unSeckey
   , seckey
-  , Point(..)
+  , Point
+  , unPoint
   , point
 
     -- ** Hashes
-  , PaymentHash(..)
+  , PaymentHash
+  , unPaymentHash
   , paymentHash
-  , PaymentPreimage(..)
+  , PaymentPreimage
+  , unPaymentPreimage
   , paymentPreimage
 
     -- ** Transaction primitives
@@ -83,8 +88,10 @@ module Lightning.Protocol.BOLT3 (
   , Locktime(..)
 
     -- ** Channel parameters
-  , CommitmentNumber(..)
+  , CommitmentNumber
+  , unCommitmentNumber
   , commitment_number
+  , next_commitment_number
   , ToSelfDelay(..)
   , CltvExpiry(..)
   , DustLimit(..)
@@ -96,8 +103,10 @@ module Lightning.Protocol.BOLT3 (
 
     -- ** Basepoints
   , Basepoints(..)
-  , PerCommitmentPoint(..)
-  , PerCommitmentSecret(..)
+  , PerCommitmentPoint
+  , unPerCommitmentPoint
+  , PerCommitmentSecret
+  , unPerCommitmentSecret
   , perCommitmentSecret
   , RevocationBasepoint(..)
   , PaymentBasepoint(..)

@@ -8,6 +8,10 @@ import Data.Maybe (isJust, isNothing)
 import Test.Tasty
 import Test.Tasty.HUnit
 import Lightning.Protocol.BOLT3
+import Lightning.Protocol.BOLT3.Types
+  ( Pubkey(..), Point(..)
+  , PaymentHash(..), PerCommitmentPoint(..)
+  )
 
 main :: IO ()
 main = defaultMain $ testGroup "ppad-bolt3" [
@@ -334,4 +338,24 @@ smartConstructorTests = testGroup "validation" [
       isNothing (commitment_number 281474976710656) @?= True
   , testCase "commitment_number rejects maxBound Word64" $ do
       isNothing (commitment_number maxBound) @?= True
+
+    -- next_commitment_number
+  , testCase "next_commitment_number 0 -> 1" $
+      case commitment_number 0 of
+        Nothing -> assertFailure "commitment_number 0"
+        Just cn0 -> case next_commitment_number cn0 of
+          Nothing -> assertFailure "next failed"
+          Just cn1 -> unCommitmentNumber cn1 @?= 1
+  , testCase "next_commitment_number (2^48-2) -> (2^48-1)" $
+      case commitment_number 281474976710654 of
+        Nothing -> assertFailure "commitment_number"
+        Just cn -> case next_commitment_number cn of
+          Nothing -> assertFailure "next failed"
+          Just cn' ->
+            unCommitmentNumber cn' @?= 281474976710655
+  , testCase "next_commitment_number (2^48-1) -> Nothing" $
+      case commitment_number 281474976710655 of
+        Nothing -> assertFailure "commitment_number"
+        Just cn ->
+          isNothing (next_commitment_number cn) @?= True
   ]
