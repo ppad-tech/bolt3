@@ -1,7 +1,6 @@
 {-# OPTIONS_HADDOCK prune #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 -- |
 -- Module: Lightning.Protocol.BOLT3.Types
@@ -42,6 +41,7 @@ module Lightning.Protocol.BOLT3.Types (
     -- * Channel parameters
   , CommitmentNumber(..)
   , commitment_number
+  , next_commitment_number
   , ToSelfDelay(..)
   , CltvExpiry(..)
   , DustLimit(..)
@@ -152,18 +152,18 @@ seckey bs
 
 -- | Transaction input sequence number.
 newtype Sequence = Sequence { unSequence :: Word32 }
-  deriving (Eq, Ord, Show, Generic, Num)
+  deriving (Eq, Ord, Show, Generic)
 
 -- | Transaction locktime.
 newtype Locktime = Locktime { unLocktime :: Word32 }
-  deriving (Eq, Ord, Show, Generic, Num)
+  deriving (Eq, Ord, Show, Generic)
 
 -- channel parameters ----------------------------------------------------------
 
 -- | 48-bit commitment number.
 newtype CommitmentNumber = CommitmentNumber
   { unCommitmentNumber :: Word64 }
-  deriving (Eq, Ord, Show, Generic, Num)
+  deriving (Eq, Ord, Show, Generic)
 
 -- | Parse a 48-bit commitment number.
 --
@@ -174,13 +174,28 @@ commitment_number n
   | otherwise = Nothing
 {-# INLINE commitment_number #-}
 
+-- | Increment a commitment number by one.
+--
+-- Returns Nothing if the result would exceed 2^48 - 1.
+--
+-- >>> fmap next_commitment_number (commitment_number 0)
+-- Just (Just (CommitmentNumber {unCommitmentNumber = 1}))
+-- >>> fmap next_commitment_number (commitment_number 281474976710655)
+-- Just Nothing
+next_commitment_number
+  :: CommitmentNumber -> Maybe CommitmentNumber
+next_commitment_number (CommitmentNumber n)
+  | n < 281474976710655 = Just (CommitmentNumber (n + 1))
+  | otherwise = Nothing
+{-# INLINE next_commitment_number #-}
+
 -- | CSV delay for to_local outputs.
 newtype ToSelfDelay = ToSelfDelay { unToSelfDelay :: Word16 }
-  deriving (Eq, Ord, Show, Generic, Num)
+  deriving (Eq, Ord, Show, Generic)
 
 -- | CLTV expiry for HTLCs.
 newtype CltvExpiry = CltvExpiry { unCltvExpiry :: Word32 }
-  deriving (Eq, Ord, Show, Generic, Num)
+  deriving (Eq, Ord, Show, Generic)
 
 -- | Dust limit threshold.
 newtype DustLimit = DustLimit { unDustLimit :: Satoshi }
@@ -188,7 +203,7 @@ newtype DustLimit = DustLimit { unDustLimit :: Satoshi }
 
 -- | Fee rate in satoshis per 1000 weight units.
 newtype FeeratePerKw = FeeratePerKw { unFeeratePerKw :: Word32 }
-  deriving (Eq, Ord, Show, Generic, Num)
+  deriving (Eq, Ord, Show, Generic)
 
 -- HTLC types ------------------------------------------------------------------
 

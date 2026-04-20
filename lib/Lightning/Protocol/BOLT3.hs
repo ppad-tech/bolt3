@@ -85,6 +85,7 @@ module Lightning.Protocol.BOLT3 (
     -- ** Channel parameters
   , CommitmentNumber(..)
   , commitment_number
+  , next_commitment_number
   , ToSelfDelay(..)
   , CltvExpiry(..)
   , DustLimit(..)
