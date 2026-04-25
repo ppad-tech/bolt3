@@ -159,7 +159,8 @@ module Lightning.Protocol.BOLT3 (
   , derive_secret
 
     -- ** Secret storage
-  , SecretStore
+  , SecretStore(..)
+  , SecretEntry(..)
   , empty_store
   , insert_secret
   , derive_old_secret

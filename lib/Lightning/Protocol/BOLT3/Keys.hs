@@ -40,7 +40,8 @@ module Lightning.Protocol.BOLT3.Keys (
   , derive_secret
 
     -- * Per-commitment secret storage
-  , SecretStore
+  , SecretStore(..)
+  , SecretEntry(..)
   , empty_store
   , insert_secret
   , derive_old_secret
