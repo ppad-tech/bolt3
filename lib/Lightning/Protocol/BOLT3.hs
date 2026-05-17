@@ -146,12 +146,19 @@ module Lightning.Protocol.BOLT3 (
 
     -- * Key derivation
   , derive_per_commitment_point
+  , derive_per_commitment_point'
   , derive_pubkey
+  , derive_pubkey'
   , derive_localpubkey
+  , derive_localpubkey'
   , derive_local_htlcpubkey
+  , derive_local_htlcpubkey'
   , derive_remote_htlcpubkey
+  , derive_remote_htlcpubkey'
   , derive_local_delayedpubkey
+  , derive_local_delayedpubkey'
   , derive_remote_delayedpubkey
+  , derive_remote_delayedpubkey'
   , derive_revocationpubkey
 
     -- ** Secret generation

@@ -3,6 +3,7 @@
 
 module Main where
 
+import qualified Crypto.Curve.Secp256k1 as S
 import Control.DeepSeq (NFData(..))
 import qualified Data.ByteString as BS
 import Data.Word (Word32, Word64)
@@ -10,9 +11,16 @@ import Lightning.Protocol.BOLT3
 import Lightning.Protocol.BOLT3.Types
   ( Pubkey(..), Point(..)
   , PaymentHash(..), PerCommitmentPoint(..)
+  , PerCommitmentSecret(..)
   , CommitmentNumber(..)
   )
 import Weigh
+
+-- | Precomputed wNAF context; reused across every apostrophe-
+--   suffixed weigh entry.
+tex :: S.Context
+tex = S.precompute
+{-# NOINLINE tex #-}
 
 -- NFData instances for weigh
 -- (Satoshi, MilliSatoshi, Point, PaymentHash, PerCommitmentSecret
@@ -165,11 +173,20 @@ instance NFData SecretStore where
   rnf ss = ss `seq` ()
 
 main :: IO ()
-main = mainWith $ do
+main = tex `seq` mainWith $ do
+  -- 'tex' is forced before mainWith so the one-time wNAF
+  -- precompute (~50 KB) doesn't get billed to whichever
+  -- apostrophe-suffixed func happens to evaluate it first.
   setColumns [Case, Allocated, GCs, Max]
 
   -- Key derivation allocations
   func "derive_pubkey" (derive_pubkey basepoint) perCommitmentPoint
+  func "derive_pubkey'"
+       (derive_pubkey' tex basepoint) perCommitmentPoint
+  func "derive_per_commitment_point"
+       derive_per_commitment_point samplePcs
+  func "derive_per_commitment_point'"
+       (derive_per_commitment_point' tex) samplePcs
   func "derive_revocationpubkey"
        (derive_revocationpubkey revocationBasepoint) perCommitmentPoint
 
@@ -305,6 +322,10 @@ main = mainWith $ do
       [0x03, 0x6d, 0x6c, 0xaa, 0xc2, 0x48, 0xaf, 0x96, 0xf6, 0xaf, 0xa7,
        0xf9, 0x04, 0xf5, 0x50, 0x25, 0x3a, 0x0f, 0x3e, 0xf3, 0xf5, 0xaa,
        0x2f, 0xe6, 0x83, 0x8a, 0x95, 0xb2, 0x16, 0x69, 0x14, 0x68, 0xe2]
+
+    samplePcs :: PerCommitmentSecret
+    samplePcs =
+      PerCommitmentSecret (BS.replicate 32 0x01)
 
     -- Secret generation test data
     seed = BS.replicate 32 0xFF

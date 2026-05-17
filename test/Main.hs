@@ -2,6 +2,7 @@
 
 module Main where
 
+import qualified Crypto.Curve.Secp256k1 as S
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base16 as B16
 import Data.Maybe (isJust, isNothing)
@@ -13,7 +14,15 @@ import Lightning.Protocol.BOLT3
 import Lightning.Protocol.BOLT3.Types
   ( Pubkey(..), Point(..)
   , PaymentHash(..), PerCommitmentPoint(..)
+  , PerCommitmentSecret(..)
   )
+
+-- Module-level wNAF context. Built once; reused across every
+-- equivalence test below. Mirrors how downstream callers should use
+-- it.
+tex :: S.Context
+tex = S.precompute
+{-# NOINLINE tex #-}
 
 main :: IO ()
 main = defaultMain $ testGroup "ppad-bolt3" [
@@ -59,6 +68,17 @@ keyDerivationTests = testGroup "BOLT #3 Appendix E" [
             "0235f2dbfaa89b57ec7b055afe29849ef7ddfeb1cefdb9ebdc43f5494984db29e5"
       case derive_pubkey basepoint perCommitmentPoint of
         Nothing -> assertFailure "derive_pubkey returned Nothing"
+        Just (Pubkey pk) -> pk @?= expected
+
+  , testCase "derive_pubkey' matches vector" $ do
+      let basepoint = Point $ hex
+            "036d6caac248af96f6afa7f904f550253a0f3ef3f5aa2fe6838a95b216691468e2"
+          perCommitmentPoint = PerCommitmentPoint $ Point $ hex
+            "025f7117a78150fe2ef97db7cfc83bd57b2e2c0d0dd25eaf467a4a1c2a45ce1486"
+          expected = hex
+            "0235f2dbfaa89b57ec7b055afe29849ef7ddfeb1cefdb9ebdc43f5494984db29e5"
+      case derive_pubkey' tex basepoint perCommitmentPoint of
+        Nothing -> assertFailure "derive_pubkey' returned Nothing"
         Just (Pubkey pk) -> pk @?= expected
 
   , testCase "derive_revocationpubkey" $ do
@@ -381,7 +401,87 @@ propertyTests = testGroup "invariants" [
       propTrimPartition
   , testProperty "commitment_fee increases with HTLCs"
       propFeeMonotonic
+  , testProperty "derive_per_commitment_point' ≡ derive_per_commitment_point"
+      propDerivePcpEquiv
+  , testProperty "derive_pubkey' ≡ derive_pubkey"
+      propDerivePubkeyEquiv
+  , testProperty "derive_localpubkey' ≡ derive_localpubkey"
+      propDeriveLocalEquiv
+  , testProperty "derive_local_htlcpubkey' ≡ derive_local_htlcpubkey"
+      propDeriveLocalHtlcEquiv
+  , testProperty "derive_remote_htlcpubkey' ≡ derive_remote_htlcpubkey"
+      propDeriveRemoteHtlcEquiv
+  , testProperty "derive_local_delayedpubkey' ≡ derive_local_delayedpubkey"
+      propDeriveLocalDelEquiv
+  , testProperty "derive_remote_delayedpubkey' ≡ derive_remote_delayedpubkey"
+      propDeriveRemoteDelEquiv
   ]
+
+-- | Random 32-byte secret, then derive a basepoint and per-commit
+--   point from it. Returns (basepoint, pcp). Using derived points
+--   keeps us on the curve without having to generate valid points
+--   directly.
+genPointPair :: Gen (Point, PerCommitmentPoint)
+genPointPair = do
+  sk1 <- vectorOf 32 (choose (0, 255 :: Int))
+  sk2 <- vectorOf 32 (choose (0, 255 :: Int))
+  let bs1 = BS.pack (fmap fromIntegral sk1)
+      bs2 = BS.pack (fmap fromIntegral sk2)
+      mkPt b = case S.parse_int256 b of
+        Nothing -> Nothing
+        Just w  -> S.serialize_point <$> S.derive_pub w
+  case (mkPt bs1, mkPt bs2) of
+    (Just p1, Just p2) ->
+      pure (Point p1, PerCommitmentPoint (Point p2))
+    _ -> genPointPair  -- ~negligible retry; sk=0 or sk>=q
+
+propDerivePcpEquiv :: Property
+propDerivePcpEquiv =
+  forAll (vectorOf 32 (choose (0, 255 :: Int))) $ \sk ->
+    let bs = BS.pack (fmap fromIntegral sk)
+        sec = PerCommitmentSecret bs
+    in  derive_per_commitment_point' tex sec
+          === derive_per_commitment_point sec
+
+propDerivePubkeyEquiv :: Property
+propDerivePubkeyEquiv =
+  forAll genPointPair $ \(bp, pcp) ->
+    derive_pubkey' tex bp pcp === derive_pubkey bp pcp
+
+propDeriveLocalEquiv :: Property
+propDeriveLocalEquiv =
+  forAll genPointPair $ \(bp, pcp) ->
+    let pbp = PaymentBasepoint bp
+    in  derive_localpubkey' tex pbp pcp
+          === derive_localpubkey pbp pcp
+
+propDeriveLocalHtlcEquiv :: Property
+propDeriveLocalHtlcEquiv =
+  forAll genPointPair $ \(bp, pcp) ->
+    let hbp = HtlcBasepoint bp
+    in  derive_local_htlcpubkey' tex hbp pcp
+          === derive_local_htlcpubkey hbp pcp
+
+propDeriveRemoteHtlcEquiv :: Property
+propDeriveRemoteHtlcEquiv =
+  forAll genPointPair $ \(bp, pcp) ->
+    let hbp = HtlcBasepoint bp
+    in  derive_remote_htlcpubkey' tex hbp pcp
+          === derive_remote_htlcpubkey hbp pcp
+
+propDeriveLocalDelEquiv :: Property
+propDeriveLocalDelEquiv =
+  forAll genPointPair $ \(bp, pcp) ->
+    let dbp = DelayedPaymentBasepoint bp
+    in  derive_local_delayedpubkey' tex dbp pcp
+          === derive_local_delayedpubkey dbp pcp
+
+propDeriveRemoteDelEquiv :: Property
+propDeriveRemoteDelEquiv =
+  forAll genPointPair $ \(bp, pcp) ->
+    let dbp = DelayedPaymentBasepoint bp
+    in  derive_remote_delayedpubkey' tex dbp pcp
+          === derive_remote_delayedpubkey dbp pcp
 
 -- | commitment_number accepts values in [0, 2^48-1] and
 --   rejects values >= 2^48.
