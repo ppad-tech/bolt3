@@ -3,6 +3,7 @@
 
 module Main where
 
+import qualified Crypto.Curve.Secp256k1 as S
 import Control.DeepSeq (NFData(..))
 import Criterion.Main
 import Data.Word (Word64)
@@ -11,6 +12,7 @@ import Lightning.Protocol.BOLT3
 import Lightning.Protocol.BOLT3.Types
   ( Pubkey(..), Point(..)
   , PaymentHash(..), PerCommitmentPoint(..)
+  , PerCommitmentSecret(..)
   , CommitmentNumber(..)
   )
 
@@ -163,11 +165,25 @@ instance NFData ValidationError where
   rnf NoOutputs = ()
   rnf (TooManyOutputs a) = rnf a
 
+-- | Precomputed wNAF context, built once and reused across the
+--   apostrophe-suffixed benches. NOINLINE keeps it from being
+--   re-created on every call site.
+tex :: S.Context
+tex = S.precompute
+{-# NOINLINE tex #-}
+
 main :: IO ()
 main = defaultMain [
     bgroup "key derivation" [
       bench "derive_pubkey" $
         whnf (derive_pubkey basepoint) perCommitmentPoint
+    , bench "derive_pubkey'" $
+        whnf (derive_pubkey' tex basepoint) perCommitmentPoint
+    , bench "derive_per_commitment_point" $
+        whnf derive_per_commitment_point samplePcs
+    , bench "derive_per_commitment_point'" $
+        whnf (derive_per_commitment_point' tex)
+          samplePcs
     , bench "derive_revocationpubkey" $
         whnf (derive_revocationpubkey revocationBasepoint) perCommitmentPoint
     ]
@@ -312,6 +328,10 @@ main = defaultMain [
       [0x03, 0x6d, 0x6c, 0xaa, 0xc2, 0x48, 0xaf, 0x96, 0xf6, 0xaf, 0xa7,
        0xf9, 0x04, 0xf5, 0x50, 0x25, 0x3a, 0x0f, 0x3e, 0xf3, 0xf5, 0xaa,
        0x2f, 0xe6, 0x83, 0x8a, 0x95, 0xb2, 0x16, 0x69, 0x14, 0x68, 0xe2]
+
+    samplePcs :: PerCommitmentSecret
+    samplePcs =
+      PerCommitmentSecret (BS.replicate 32 0x01)
 
     -- Secret generation test data
     seed = BS.replicate 32 0xFF

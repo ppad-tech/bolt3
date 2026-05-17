@@ -77,6 +77,7 @@ benchmark bolt3-bench
     , criterion
     , deepseq
     , ppad-bolt3
+    , ppad-secp256k1 >= 0.5.4 && < 0.6
 
 benchmark bolt3-weigh
   type:                exitcode-stdio-1.0
@@ -92,5 +93,6 @@ benchmark bolt3-weigh
     , bytestring
     , deepseq
     , ppad-bolt3
+    , ppad-secp256k1 >= 0.5.4 && < 0.6
     , weigh
 
