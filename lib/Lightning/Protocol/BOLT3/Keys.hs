@@ -23,14 +23,21 @@
 module Lightning.Protocol.BOLT3.Keys (
     -- * Per-commitment point derivation
     derive_per_commitment_point
+  , derive_per_commitment_point'
 
     -- * Key derivation
   , derive_pubkey
+  , derive_pubkey'
   , derive_localpubkey
+  , derive_localpubkey'
   , derive_local_htlcpubkey
+  , derive_local_htlcpubkey'
   , derive_remote_htlcpubkey
+  , derive_remote_htlcpubkey'
   , derive_local_delayedpubkey
+  , derive_local_delayedpubkey'
   , derive_remote_delayedpubkey
+  , derive_remote_delayedpubkey'
 
     -- * Revocation key derivation
   , derive_revocationpubkey
@@ -77,6 +84,24 @@ derive_per_commitment_point (PerCommitmentSecret sec) = do
   pure $! PerCommitmentPoint (Point bs)
 {-# INLINE derive_per_commitment_point #-}
 
+-- | As 'derive_per_commitment_point', but takes a precomputed
+--   secp256k1 'S.Context' so the @G@-base scalar mult uses wNAF.
+--   Caller threads a single context across many calls.
+--
+-- >>> let !tex = S.precompute
+-- >>> derive_per_commitment_point' tex secret
+-- Just (PerCommitmentPoint ...)
+derive_per_commitment_point'
+  :: S.Context
+  -> PerCommitmentSecret
+  -> Maybe PerCommitmentPoint
+derive_per_commitment_point' tex (PerCommitmentSecret sec) = do
+  sk <- S.parse_int256 sec
+  pk <- S.derive_pub' tex sk
+  let !bs = S.serialize_point pk
+  pure $! PerCommitmentPoint (Point bs)
+{-# INLINE derive_per_commitment_point' #-}
+
 -- Key derivation ---------------------------------------------------------
 
 -- | Derive a pubkey from a basepoint and per-commitment point.
@@ -106,6 +131,32 @@ derive_pubkey (Point basepointBs) (PerCommitmentPoint (Point pcpBs)) = do
   pure $! Pubkey bs
 {-# INLINE derive_pubkey #-}
 
+-- | As 'derive_pubkey', but takes a precomputed secp256k1
+--   'S.Context'. The @tweak * G@ multiplication uses wNAF; this is
+--   the highest-leverage variant since 'derive_pubkey' fires five
+--   times per commitment-key derivation.
+--
+-- >>> let !tex = S.precompute
+-- >>> derive_pubkey' tex basepoint per_commitment_point
+-- Just (Pubkey ...)
+derive_pubkey'
+  :: S.Context
+  -> Point             -- ^ basepoint
+  -> PerCommitmentPoint -- ^ per_commitment_point
+  -> Maybe Pubkey
+derive_pubkey'
+  tex
+  (Point basepointBs)
+  (PerCommitmentPoint (Point pcpBs)) = do
+    basepoint <- S.parse_point basepointBs
+    let !h = SHA256.hash (pcpBs <> basepointBs)
+    tweak <- S.parse_int256 h
+    tweakPoint <- S.derive_pub' tex tweak
+    let !result = S.add basepoint tweakPoint
+        !bs = S.serialize_point result
+    pure $! Pubkey bs
+{-# INLINE derive_pubkey' #-}
+
 -- | Derive localpubkey from payment_basepoint and per_commitment_point.
 --
 -- >>> derive_localpubkey payment_basepoint per_commitment_point
@@ -117,6 +168,17 @@ derive_localpubkey
 derive_localpubkey (PaymentBasepoint pt) pcp =
   LocalPubkey <$> derive_pubkey pt pcp
 {-# INLINE derive_localpubkey #-}
+
+-- | As 'derive_localpubkey', but uses 'derive_pubkey'' internally
+--   (wNAF-accelerated).
+derive_localpubkey'
+  :: S.Context
+  -> PaymentBasepoint
+  -> PerCommitmentPoint
+  -> Maybe LocalPubkey
+derive_localpubkey' tex (PaymentBasepoint pt) pcp =
+  LocalPubkey <$> derive_pubkey' tex pt pcp
+{-# INLINE derive_localpubkey' #-}
 
 -- | Derive local_htlcpubkey from htlc_basepoint and per_commitment_point.
 --
@@ -130,6 +192,16 @@ derive_local_htlcpubkey (HtlcBasepoint pt) pcp =
   LocalHtlcPubkey <$> derive_pubkey pt pcp
 {-# INLINE derive_local_htlcpubkey #-}
 
+-- | As 'derive_local_htlcpubkey', wNAF variant.
+derive_local_htlcpubkey'
+  :: S.Context
+  -> HtlcBasepoint
+  -> PerCommitmentPoint
+  -> Maybe LocalHtlcPubkey
+derive_local_htlcpubkey' tex (HtlcBasepoint pt) pcp =
+  LocalHtlcPubkey <$> derive_pubkey' tex pt pcp
+{-# INLINE derive_local_htlcpubkey' #-}
+
 -- | Derive remote_htlcpubkey from htlc_basepoint and per_commitment_point.
 --
 -- >>> derive_remote_htlcpubkey htlc_basepoint per_commitment_point
@@ -141,6 +213,16 @@ derive_remote_htlcpubkey
 derive_remote_htlcpubkey (HtlcBasepoint pt) pcp =
   RemoteHtlcPubkey <$> derive_pubkey pt pcp
 {-# INLINE derive_remote_htlcpubkey #-}
+
+-- | As 'derive_remote_htlcpubkey', wNAF variant.
+derive_remote_htlcpubkey'
+  :: S.Context
+  -> HtlcBasepoint
+  -> PerCommitmentPoint
+  -> Maybe RemoteHtlcPubkey
+derive_remote_htlcpubkey' tex (HtlcBasepoint pt) pcp =
+  RemoteHtlcPubkey <$> derive_pubkey' tex pt pcp
+{-# INLINE derive_remote_htlcpubkey' #-}
 
 -- | Derive local_delayedpubkey from delayed_payment_basepoint and
 -- per_commitment_point.
@@ -155,6 +237,16 @@ derive_local_delayedpubkey (DelayedPaymentBasepoint pt) pcp =
   LocalDelayedPubkey <$> derive_pubkey pt pcp
 {-# INLINE derive_local_delayedpubkey #-}
 
+-- | As 'derive_local_delayedpubkey', wNAF variant.
+derive_local_delayedpubkey'
+  :: S.Context
+  -> DelayedPaymentBasepoint
+  -> PerCommitmentPoint
+  -> Maybe LocalDelayedPubkey
+derive_local_delayedpubkey' tex (DelayedPaymentBasepoint pt) pcp =
+  LocalDelayedPubkey <$> derive_pubkey' tex pt pcp
+{-# INLINE derive_local_delayedpubkey' #-}
+
 -- | Derive remote_delayedpubkey from delayed_payment_basepoint and
 -- per_commitment_point.
 --
@@ -168,7 +260,22 @@ derive_remote_delayedpubkey (DelayedPaymentBasepoint pt) pcp =
   RemoteDelayedPubkey <$> derive_pubkey pt pcp
 {-# INLINE derive_remote_delayedpubkey #-}
 
+-- | As 'derive_remote_delayedpubkey', wNAF variant.
+derive_remote_delayedpubkey'
+  :: S.Context
+  -> DelayedPaymentBasepoint
+  -> PerCommitmentPoint
+  -> Maybe RemoteDelayedPubkey
+derive_remote_delayedpubkey' tex (DelayedPaymentBasepoint pt) pcp =
+  RemoteDelayedPubkey <$> derive_pubkey' tex pt pcp
+{-# INLINE derive_remote_delayedpubkey' #-}
+
 -- Revocation key derivation ----------------------------------------------
+
+-- Note: no @derive_revocationpubkey'@ is provided. The two scalar
+-- mults inside this function are general (basepoint * scalar, not
+-- @G * scalar@), so the wNAF table built by 'S.precompute' — which
+-- stores multiples of the generator — doesn't apply.
 
 -- | Derive revocationpubkey from revocation_basepoint and
 -- per_commitment_point.
