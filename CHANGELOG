@@ -1,6 +1,6 @@
 # Changelog
 
-- 0.1.0 (UNRELEASED)
+- 0.1.0 (2026-10-10)
   * A substantial rewrite, with breaking changes throughout:
 
     * Ports to ppad-bolt1 0.1.0 and ppad-tx 0.2.0. Amounts, points,
