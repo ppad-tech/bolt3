@@ -360,7 +360,7 @@ fundingTests = testGroup "Funding transaction (Appendix B)" [
       (lpk, rpk) <- fundingPubkeys
       tx <- hex b_funding_tx >>= decodeTx
       txid <- hex b_funding_txid
-      BT.txid tx @?= BT.TxId (BS.reverse txid)
+      BT.un_txid (BT.txid tx) @?= BS.reverse txid
       case drop (fromIntegral b_funding_output) (NE.toList (BT.tx_outputs tx))
         of
           (BT.TxOut value spk : _) -> do
@@ -382,9 +382,9 @@ decodeTx = need "undecodable transaction" . BT.from_bytes
 
 -- | The single input's witness stack of a spec transaction.
 witnessOf :: BT.Tx -> IO [BS.ByteString]
-witnessOf tx = case BT.tx_witnesses tx of
-  [BT.Witness items] -> pure items
-  _ -> assertFailure "expected one witness"
+witnessOf tx = case NE.toList (BT.tx_inputs tx) of
+  [i] | BT.Witness items <- BT.txin_witness i -> pure items
+  _ -> assertFailure "expected one input"
 
 -- | A test HTLC from the Appendix C parameters.
 testHtlc :: Int -> IO HTLC
@@ -432,7 +432,8 @@ vectorKeys = do
 vectorOutpoint :: IO BT.OutPoint
 vectorOutpoint = do
   txid <- hex c_funding_txid
-  pure (BT.OutPoint (BT.TxId (BS.reverse txid)) c_funding_output_index)
+  t <- need "invalid txid" (BT.mk_txid (BS.reverse txid))
+  pure (BT.OutPoint t c_funding_output_index)
 
 -- | The commitment context for a vector: local's commitment, with local
 --   as the opener.
