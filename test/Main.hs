@@ -2,9 +2,13 @@
 
 module Main where
 
+import qualified Bitcoin.Prim.Tx as BT
+import Control.Monad (foldM)
 import qualified Crypto.Curve.Secp256k1 as S
+import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base16 as B16
+import qualified Data.List.NonEmpty as NE
 import Data.Maybe (isJust, isNothing)
 import Data.Word (Word32, Word64)
 import Test.Tasty
@@ -16,6 +20,7 @@ import Lightning.Protocol.BOLT3.Types
   , PaymentHash(..), PerCommitmentPoint(..)
   , PerCommitmentSecret(..)
   )
+import Vectors
 
 -- Module-level wNAF context. Built once; reused across every
 -- equivalence test below. Mirrors how downstream callers should use
@@ -35,6 +40,15 @@ main = defaultMain $ testGroup "ppad-bolt3" [
   , testGroup "Secret storage" [
       secretStorageTests
     ]
+  , testGroup "Funding transaction" [
+      fundingTests
+    ]
+  , testGroup "Commitment and HTLC transactions" [
+      testGroup "BOLT #3 Appendix C" $
+        fmap (commitVectorTests False) appendix_c
+    , testGroup "BOLT #3 Appendix F (anchors)" $
+        fmap (commitVectorTests True) appendix_f
+    ]
   , testGroup "Fee calculation" [
       feeCalculationTests
     ]
@@ -49,48 +63,72 @@ main = defaultMain $ testGroup "ppad-bolt3" [
     ]
   ]
 
--- hex decoding helper
-hex :: BS.ByteString -> BS.ByteString
+-- | Decode a hex literal, failing the enclosing test on bad input.
+hex :: BS.ByteString -> IO BS.ByteString
 hex h = case B16.decode h of
-  Right bs -> bs
-  Left _ -> error "invalid hex"
+  Just bs -> pure bs
+  Nothing -> assertFailure ("invalid hex literal: " ++ show h)
+
+-- | Unwrap a Just, failing the enclosing test on Nothing.
+need :: String -> Maybe a -> IO a
+need msg = maybe (assertFailure msg) pure
 
 -- Key derivation test vectors from Appendix E ---------------------------------
 
 keyDerivationTests :: TestTree
 keyDerivationTests = testGroup "BOLT #3 Appendix E" [
     testCase "derive_pubkey" $ do
-      let basepoint = Point $ hex
-            "036d6caac248af96f6afa7f904f550253a0f3ef3f5aa2fe6838a95b216691468e2"
-          perCommitmentPoint = PerCommitmentPoint $ Point $ hex
-            "025f7117a78150fe2ef97db7cfc83bd57b2e2c0d0dd25eaf467a4a1c2a45ce1486"
-          expected = hex
-            "0235f2dbfaa89b57ec7b055afe29849ef7ddfeb1cefdb9ebdc43f5494984db29e5"
+      basepoint <- Point <$> hex
+        "036d6caac248af96f6afa7f904f550253a0f3ef3f5aa2fe6838a95b216691468e2"
+      perCommitmentPoint <- PerCommitmentPoint . Point <$> hex
+        "025f7117a78150fe2ef97db7cfc83bd57b2e2c0d0dd25eaf467a4a1c2a45ce1486"
+      expected <- hex
+        "0235f2dbfaa89b57ec7b055afe29849ef7ddfeb1cefdb9ebdc43f5494984db29e5"
       case derive_pubkey basepoint perCommitmentPoint of
         Nothing -> assertFailure "derive_pubkey returned Nothing"
         Just (Pubkey pk) -> pk @?= expected
 
   , testCase "derive_pubkey' matches vector" $ do
-      let basepoint = Point $ hex
-            "036d6caac248af96f6afa7f904f550253a0f3ef3f5aa2fe6838a95b216691468e2"
-          perCommitmentPoint = PerCommitmentPoint $ Point $ hex
-            "025f7117a78150fe2ef97db7cfc83bd57b2e2c0d0dd25eaf467a4a1c2a45ce1486"
-          expected = hex
-            "0235f2dbfaa89b57ec7b055afe29849ef7ddfeb1cefdb9ebdc43f5494984db29e5"
+      basepoint <- Point <$> hex
+        "036d6caac248af96f6afa7f904f550253a0f3ef3f5aa2fe6838a95b216691468e2"
+      perCommitmentPoint <- PerCommitmentPoint . Point <$> hex
+        "025f7117a78150fe2ef97db7cfc83bd57b2e2c0d0dd25eaf467a4a1c2a45ce1486"
+      expected <- hex
+        "0235f2dbfaa89b57ec7b055afe29849ef7ddfeb1cefdb9ebdc43f5494984db29e5"
       case derive_pubkey' tex basepoint perCommitmentPoint of
         Nothing -> assertFailure "derive_pubkey' returned Nothing"
         Just (Pubkey pk) -> pk @?= expected
 
   , testCase "derive_revocationpubkey" $ do
-      let revocationBasepoint = RevocationBasepoint $ Point $ hex
-            "036d6caac248af96f6afa7f904f550253a0f3ef3f5aa2fe6838a95b216691468e2"
-          perCommitmentPoint = PerCommitmentPoint $ Point $ hex
-            "025f7117a78150fe2ef97db7cfc83bd57b2e2c0d0dd25eaf467a4a1c2a45ce1486"
-          expected = hex
-            "02916e326636d19c33f13e8c0c3a03dd157f332f3e99c317c141dd865eb01f8ff0"
+      revocationBasepoint <- RevocationBasepoint . Point <$> hex
+        "036d6caac248af96f6afa7f904f550253a0f3ef3f5aa2fe6838a95b216691468e2"
+      perCommitmentPoint <- PerCommitmentPoint . Point <$> hex
+        "025f7117a78150fe2ef97db7cfc83bd57b2e2c0d0dd25eaf467a4a1c2a45ce1486"
+      expected <- hex
+        "02916e326636d19c33f13e8c0c3a03dd157f332f3e99c317c141dd865eb01f8ff0"
       case derive_revocationpubkey revocationBasepoint perCommitmentPoint of
         Nothing -> assertFailure "derive_revocationpubkey returned Nothing"
         Just (RevocationPubkey (Pubkey pk)) -> pk @?= expected
+
+  , testCase "derive_per_commitment_point" $ do
+      secret <- PerCommitmentSecret <$> hex
+        "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100"
+      expected <- hex
+        "025f7117a78150fe2ef97db7cfc83bd57b2e2c0d0dd25eaf467a4a1c2a45ce1486"
+      PerCommitmentPoint (Point pcp) <-
+        need "derive_per_commitment_point returned Nothing"
+          (derive_per_commitment_point secret)
+      pcp @?= expected
+
+  , testCase "derive_per_commitment_point' matches vector" $ do
+      secret <- PerCommitmentSecret <$> hex
+        "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100"
+      expected <- hex
+        "025f7117a78150fe2ef97db7cfc83bd57b2e2c0d0dd25eaf467a4a1c2a45ce1486"
+      PerCommitmentPoint (Point pcp) <-
+        need "derive_per_commitment_point' returned Nothing"
+          (derive_per_commitment_point' tex secret)
+      pcp @?= expected
   ]
 
 -- Secret generation test vectors from Appendix D ------------------------------
@@ -98,92 +136,254 @@ keyDerivationTests = testGroup "BOLT #3 Appendix E" [
 secretGenerationTests :: TestTree
 secretGenerationTests = testGroup "BOLT #3 Appendix D - Generation" [
     testCase "generate_from_seed 0 final node" $ do
-      let seed = hex
-            "0000000000000000000000000000000000000000000000000000000000000000"
-          i = 281474976710655
-          expected = hex
-            "02a40c85b6f28da08dfdbe0926c53fab2de6d28c10301f8f7c4073d5e42e3148"
+      seed <- hex
+        "0000000000000000000000000000000000000000000000000000000000000000"
+      expected <- hex
+        "02a40c85b6f28da08dfdbe0926c53fab2de6d28c10301f8f7c4073d5e42e3148"
+      let i = 281474976710655
       generate_from_seed seed i @?= expected
 
   , testCase "generate_from_seed FF final node" $ do
-      let seed = hex
-            "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
-          i = 281474976710655
-          expected = hex
-            "7cc854b54e3e0dcdb010d7a3fee464a9687be6e8db3be6854c475621e007a5dc"
+      seed <- hex
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+      expected <- hex
+        "7cc854b54e3e0dcdb010d7a3fee464a9687be6e8db3be6854c475621e007a5dc"
+      let i = 281474976710655
       generate_from_seed seed i @?= expected
 
   , testCase "generate_from_seed FF alternate bits 1" $ do
-      let seed = hex
-            "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
-          i = 0xaaaaaaaaaaa
-          expected = hex
-            "56f4008fb007ca9acf0e15b054d5c9fd12ee06cea347914ddbaed70d1c13a528"
+      seed <- hex
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+      expected <- hex
+        "56f4008fb007ca9acf0e15b054d5c9fd12ee06cea347914ddbaed70d1c13a528"
+      let i = 0xaaaaaaaaaaa
       generate_from_seed seed i @?= expected
 
   , testCase "generate_from_seed FF alternate bits 2" $ do
-      let seed = hex
-            "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
-          i = 0x555555555555
-          expected = hex
-            "9015daaeb06dba4ccc05b91b2f73bd54405f2be9f217fbacd3c5ac2e62327d31"
+      seed <- hex
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+      expected <- hex
+        "9015daaeb06dba4ccc05b91b2f73bd54405f2be9f217fbacd3c5ac2e62327d31"
+      let i = 0x555555555555
       generate_from_seed seed i @?= expected
 
   , testCase "generate_from_seed 01 last nontrivial node" $ do
-      let seed = hex
-            "0101010101010101010101010101010101010101010101010101010101010101"
-          i = 1
-          expected = hex
-            "915c75942a26bb3a433a8ce2cb0427c29ec6c1775cfc78328b57f6ba7bfeaa9c"
+      seed <- hex
+        "0101010101010101010101010101010101010101010101010101010101010101"
+      expected <- hex
+        "915c75942a26bb3a433a8ce2cb0427c29ec6c1775cfc78328b57f6ba7bfeaa9c"
+      let i = 1
       generate_from_seed seed i @?= expected
   ]
 
 -- Secret storage test vectors from Appendix D ---------------------------------
 
 secretStorageTests :: TestTree
-secretStorageTests = testGroup "BOLT #3 Appendix D - Storage" [
-    testCase "insert_secret correct sequence" $ do
-      let secrets = [
-              (281474976710655, hex
-                "7cc854b54e3e0dcdb010d7a3fee464a9687be6e8db3be6854c475621e007a5dc")
-            , (281474976710654, hex
-                "c7518c8ae4660ed02894df8976fa1a3659c1a8b4b5bec0c4b872abeba4cb8964")
-            , (281474976710653, hex
-                "2273e227a5b7449b6e70f1fb4652864038b1cbf9cd7c043a7d6456b7fc275ad8")
-            , (281474976710652, hex
-                "27cddaa5624534cb6cb9d7da077cf2b22ab21e9b506fd4998a51d54502e99116")
-            , (281474976710651, hex
-                "c65716add7aa98ba7acb236352d665cab17345fe45b55fb879ff80e6bd0c41dd")
-            , (281474976710650, hex
-                "969660042a28f32d9be17344e09374b379962d03db1574df5a8a5a47e19ce3f2")
-            , (281474976710649, hex
-                "a5a64476122ca0925fb344bdc1854c1c0a59fc614298e50a33e331980a220f32")
-            , (281474976710648, hex
-                "05cde6323d949933f7f7b78776bcc1ea6d9b31447732e3802e1f7ac44b650e17")
-            ]
-      let insertAll store [] = Just store
-          insertAll store ((idx, secret):rest) =
-            case insert_secret secret idx store of
-              Nothing -> Nothing
-              Just store' -> insertAll store' rest
-      case insertAll empty_store secrets of
-        Nothing -> assertFailure "insert_secret failed on correct sequence"
-        Just _ -> return ()
+secretStorageTests = testGroup "BOLT #3 Appendix D - Storage" $
+     fmap storageVectorTest appendix_d_storage
+  ++ [
+    testCase "derive_old_secret after each correct insert" $ do
+      steps <- case filter isCorrect appendix_d_storage of
+        (v : _) -> pure (sv_steps v)
+        [] -> assertFailure "missing correct sequence vector"
+      known <- traverse (\st -> (,) (ss_index st) <$> hex (ss_secret st))
+                 steps
+      -- after each insert, every index inserted so far is derivable
+      let step (store, seen) (i, sec) = do
+            store' <- case insert_secret sec i store of
+              Just st -> pure st
+              Nothing -> assertFailure
+                ("rejected correct secret at I=" ++ show i)
+            let seen' = (i, sec) : seen
+            mapM_ (\(j, s) ->
+                    assertEqual
+                      ("after I=" ++ show i ++ ", derive_old_secret "
+                        ++ show j)
+                      (Just s) (derive_old_secret j store'))
+                  seen'
+            pure (store', seen')
+      (store, _) <- foldM step (empty_store, []) known
+      -- the next index has not been received
+      assertEqual "derive_old_secret of unreceived index"
+        Nothing (derive_old_secret 281474976710647 store)
 
-  , testCase "insert_secret #1 incorrect" $ do
-      -- First secret is from wrong seed, second should fail
-      let store0 = empty_store
-      case insert_secret (hex
-             "02a40c85b6f28da08dfdbe0926c53fab2de6d28c10301f8f7c4073d5e42e3148")
-             281474976710655 store0 of
-        Nothing -> assertFailure "First insert should succeed"
-        Just store1 ->
-          case insert_secret (hex
-                 "c7518c8ae4660ed02894df8976fa1a3659c1a8b4b5bec0c4b872abeba4cb8964")
-                 281474976710654 store1 of
-            Nothing -> return ()  -- Expected to fail
-            Just _ -> assertFailure "Second insert should fail"
+  , testCase "insert_secret rejects 31-byte secret" $
+      isNothing (insert_secret (BS.replicate 31 0) maxCommitNum empty_store)
+        @?= True
+  , testCase "insert_secret rejects 33-byte secret" $
+      isNothing (insert_secret (BS.replicate 33 0) maxCommitNum empty_store)
+        @?= True
+  , testCase "insert_secret rejects index 2^48" $
+      isNothing
+        (insert_secret (BS.replicate 32 0) (maxCommitNum + 1) empty_store)
+        @?= True
+  , testCase "insert_secret accepts index 2^48-1" $
+      isJust (insert_secret (BS.replicate 32 0) maxCommitNum empty_store)
+        @?= True
   ]
+  where
+    isCorrect v = sv_name v == "insert_secret correct sequence"
+
+-- | Run a storage vector, asserting that each insert_secret call is
+--   accepted or rejected exactly as the spec says.
+storageVectorTest :: StorageVector -> TestTree
+storageVectorTest (StorageVector name steps) =
+    testCase name (go empty_store steps)
+  where
+    go _ [] = pure ()
+    go store (StorageStep i ok s : rest) = do
+      sec <- hex s
+      case (insert_secret sec i store, ok) of
+        (Just store', True) -> go store' rest
+        (Nothing, False) -> go store rest
+        (Just _, False) ->
+          assertFailure ("accepted incorrect secret at I=" ++ show i)
+        (Nothing, True) ->
+          assertFailure ("rejected correct secret at I=" ++ show i)
+
+-- Funding transaction test vectors from Appendix B ----------------------------
+
+fundingTests :: TestTree
+fundingTests = testGroup "BOLT #3 Appendix B" [
+    testCase "funding witness script" $ do
+      (lpk, rpk) <- fundingPubkeys
+      wscript <- hex b_funding_wscript
+      unScript (funding_script lpk rpk) @?= wscript
+      unScript (funding_script rpk lpk) @?= wscript
+
+  , testCase "funding output" $ do
+      (lpk, rpk) <- fundingPubkeys
+      tx <- hex b_funding_tx >>= decodeTx
+      txid <- hex b_funding_txid
+      BT.txid tx @?= TxId (BS.reverse txid)
+      case drop (fromIntegral b_funding_output) (NE.toList (BT.tx_outputs tx))
+        of
+          (BT.TxOut value spk : _) -> do
+            value @?= b_funding_satoshis
+            spk @?= unScript (to_p2wsh (funding_script lpk rpk))
+          [] -> assertFailure "missing funding output"
+  ]
+  where
+    fundingPubkeys = do
+      lpk <- FundingPubkey . Pubkey <$> hex b_local_funding_pubkey
+      rpk <- FundingPubkey . Pubkey <$> hex b_remote_funding_pubkey
+      pure (lpk, rpk)
+
+-- Commitment and HTLC transaction test vectors from Appendices C and F --------
+
+-- | Decode a serialized transaction, failing the test on bad input.
+decodeTx :: BS.ByteString -> IO BT.Tx
+decodeTx = need "undecodable transaction" . BT.from_bytes
+
+-- | Decode a hex transaction from the spec and strip its witnesses,
+--   giving the unsigned serialization that the builders produce.
+unsignedTx :: BS.ByteString -> IO BS.ByteString
+unsignedTx h = BT.to_bytes_legacy <$> (hex h >>= decodeTx)
+
+-- | A test HTLC from the Appendix C parameters.
+testHtlc :: Int -> IO HTLC
+testHtlc i = case drop i c_htlcs of
+  (TestHtlc offered amt expiry pre : _) -> do
+    preimage <- hex pre
+    pure HTLC
+      { htlc_direction = if offered then HTLCOffered else HTLCReceived
+      , htlc_amount_msat = MilliSatoshi amt
+      , htlc_payment_hash = PaymentHash (SHA256.hash preimage)
+      , htlc_cltv_expiry = CltvExpiry expiry
+      }
+  [] -> assertFailure ("no test HTLC #" ++ show i)
+
+-- | Commitment keys from the Appendix C parameters, which Appendix F
+--   shares.
+vectorKeys :: IO CommitmentKeys
+vectorKeys = do
+  revocation <- pk c_local_revocation_pubkey
+  delayed <- pk c_local_delayedpubkey
+  localHtlc <- pk c_local_htlcpubkey
+  remoteHtlc <- pk c_remote_htlcpubkey
+  remotePayment <- pk c_remote_payment_basepoint
+  localFunding <- pk c_local_funding_pubkey
+  remoteFunding <- pk c_remote_funding_pubkey
+  pure CommitmentKeys
+    { ck_revocation_pubkey = RevocationPubkey revocation
+    , ck_local_delayed = LocalDelayedPubkey delayed
+    , ck_local_htlc = LocalHtlcPubkey localHtlc
+    , ck_remote_htlc = RemoteHtlcPubkey remoteHtlc
+      -- the vectors use the payment basepoints as htlc basepoints, so
+      -- localpubkey equals local_htlcpubkey
+    , ck_local_payment = LocalPubkey localHtlc
+      -- to_remote pays P2WPKH(remote_payment_basepoint)
+    , ck_remote_payment = RemotePubkey remotePayment
+    , ck_local_funding = FundingPubkey localFunding
+    , ck_remote_funding = FundingPubkey remoteFunding
+    }
+  where
+    pk = fmap Pubkey . hex
+
+-- | The commitment context for a vector: local's commitment, with local
+--   as the opener.
+vectorContext :: Bool -> CommitVector -> IO CommitmentContext
+vectorContext anchors v = do
+  keys <- vectorKeys
+  fundingTxid <- hex c_funding_txid
+  localBp <- PaymentBasepoint . Point <$> hex c_local_payment_basepoint
+  remoteBp <- PaymentBasepoint . Point <$> hex c_remote_payment_basepoint
+  cn <- need "invalid commitment number"
+          (commitment_number c_commitment_number)
+  htlcs <- traverse testHtlc (cv_htlcs v)
+  pure CommitmentContext
+    { cc_funding_outpoint =
+        OutPoint (TxId (BS.reverse fundingTxid)) c_funding_output_index
+    , cc_commitment_number = cn
+    , cc_local_payment_bp = localBp
+    , cc_remote_payment_bp = remoteBp
+    , cc_to_self_delay = ToSelfDelay c_local_delay
+    , cc_dust_limit = DustLimit (Satoshi (cv_dust_limit_sat v))
+    , cc_feerate = FeeratePerKw (cv_feerate_per_kw v)
+    , cc_features = ChannelFeatures { cf_option_anchors = anchors }
+    , cc_is_funder = True
+    , cc_to_local_msat = MilliSatoshi (cv_to_local_msat v)
+    , cc_to_remote_msat = MilliSatoshi (cv_to_remote_msat v)
+    , cc_htlcs = htlcs
+    , cc_keys = keys
+    }
+
+-- | Assert that the commitment tx and each HTLC tx of a vector match
+--   the spec's, with witnesses stripped.
+commitVectorTests :: Bool -> CommitVector -> TestTree
+commitVectorTests anchors v = testGroup (cv_name v) $
+    testCase "commitment tx" (do
+      ctx <- vectorContext anchors v
+      expected <- unsignedTx (cv_commit_tx v)
+      encode_tx (build_commitment_tx ctx) @?= Just expected)
+  : fmap htlcTxTest (cv_htlc_txs v)
+  where
+    htlcTxTest (HtlcTxVector kind i out raw) =
+      testCase (kindName kind ++ " for htlc #" ++ show i
+                 ++ " (output " ++ show out ++ ")") $ do
+        ctx <- vectorContext anchors v
+        commit <- need "empty commitment tx"
+                    (commitment_to_tx (build_commitment_tx ctx))
+        htlc <- testHtlc i
+        expected <- unsignedTx raw
+        let keys = cc_keys ctx
+            hctx = HTLCContext
+              { hc_commitment_txid = BT.txid commit
+              , hc_output_index = out
+              , hc_htlc = htlc
+              , hc_to_self_delay = cc_to_self_delay ctx
+              , hc_feerate = cc_feerate ctx
+              , hc_features = cc_features ctx
+              , hc_revocation_pubkey = ck_revocation_pubkey keys
+              , hc_local_delayed = ck_local_delayed keys
+              }
+        encode_htlc_tx (build kind hctx) @?= expected
+
+    kindName HtlcSuccess = "htlc-success tx"
+    kindName HtlcTimeout = "htlc-timeout tx"
+
+    build HtlcSuccess = build_htlc_success_tx
+    build HtlcTimeout = build_htlc_timeout_tx
 
 -- Fee calculation tests -------------------------------------------------------
 
@@ -401,6 +601,8 @@ propertyTests = testGroup "invariants" [
       propTrimPartition
   , testProperty "commitment_fee increases with HTLCs"
       propFeeMonotonic
+  , testProperty "insert_secret keeps every inserted secret derivable"
+      propSecretStoreDerivable
   , testProperty "derive_per_commitment_point' ≡ derive_per_commitment_point"
       propDerivePcpEquiv
   , testProperty "derive_pubkey' ≡ derive_pubkey"
@@ -482,6 +684,30 @@ propDeriveRemoteDelEquiv =
     let dbp = DelayedPaymentBasepoint bp
     in  derive_remote_delayedpubkey' tex dbp pcp
           === derive_remote_delayedpubkey dbp pcp
+
+-- | After inserting a prefix of a correct sequence (descending from
+--   2^48-1, all from one seed), every inserted index is derivable and
+--   the store's buckets are strictly ascending.
+propSecretStoreDerivable :: Property
+propSecretStoreDerivable =
+  forAll (vectorOf 32 (choose (0, 255 :: Int))) $ \sd ->
+  forAll (choose (1, 1024)) $ \n ->
+    let seed = BS.pack (fmap fromIntegral sd)
+        idxs = take n [maxCommitNum, maxCommitNum - 1 ..]
+        secret = generate_from_seed seed
+        insert st i = st >>= insert_secret (secret i) i
+    in  case foldl insert (Just empty_store) idxs of
+          Nothing -> counterexample "insert_secret rejected" False
+          Just store ->
+            let buckets = fmap se_bucket (unSecretStore store)
+            in  conjoin
+                  [ counterexample "buckets not ascending"
+                      (and (zipWith (<) buckets (drop 1 buckets)))
+                  , conjoin
+                      [ counterexample ("index " ++ show i)
+                          (derive_old_secret i store === Just (secret i))
+                      | i <- idxs ]
+                  ]
 
 -- | commitment_number accepts values in [0, 2^48-1] and
 --   rejects values >= 2^48.
