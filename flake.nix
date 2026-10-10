@@ -26,12 +26,19 @@
       ref  = "master";
       inputs.ppad-nixpkgs.follows = "ppad-nixpkgs";
     };
+    ppad-fixed = {
+      type = "git";
+      url  = "git://git.ppad.tech/fixed.git";
+      ref  = "master";
+      inputs.ppad-nixpkgs.follows = "ppad-nixpkgs";
+    };
     ppad-secp256k1 = {
       type = "git";
       url  = "git://git.ppad.tech/secp256k1.git";
       ref  = "master";
       inputs.ppad-nixpkgs.follows = "ppad-nixpkgs";
       inputs.ppad-sha256.follows = "ppad-sha256";
+      inputs.ppad-fixed.follows = "ppad-fixed";
     };
     ppad-ripemd160 = {
       type = "git";
@@ -51,8 +58,8 @@
   };
 
   outputs = { self, nixpkgs, flake-utils, ppad-nixpkgs
-            , ppad-bolt1, ppad-bolt9, ppad-sha256, ppad-secp256k1
-            , ppad-ripemd160, ppad-tx }:
+            , ppad-bolt1, ppad-bolt9, ppad-sha256, ppad-fixed
+            , ppad-secp256k1, ppad-ripemd160, ppad-tx }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         lib = "ppad-bolt3";
@@ -66,6 +73,12 @@
         sha256-llvm =
           hlib.addBuildTools
             (hlib.enableCabalFlag sha256 "llvm")
+            [ llvm clang ];
+
+        fixed = ppad-fixed.packages.${system}.default;
+        fixed-llvm =
+          hlib.addBuildTools
+            (hlib.enableCabalFlag fixed "llvm")
             [ llvm clang ];
 
         secp256k1 = ppad-secp256k1.packages.${system}.default;
@@ -93,6 +106,7 @@
           ppad-bolt1 = bolt1;
           ppad-bolt9 = bolt9;
           ppad-sha256 = sha256-llvm;
+          ppad-fixed = fixed-llvm;
           ppad-secp256k1 = secp256k1-llvm;
           ppad-ripemd160 = ripemd160-llvm;
           ppad-tx = tx-llvm;
