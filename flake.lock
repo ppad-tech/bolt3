@@ -217,16 +217,19 @@
           "nixpkgs"
         ],
         "ppad-base16": "ppad-base16",
+        "ppad-bolt9": [
+          "ppad-bolt9"
+        ],
         "ppad-nixpkgs": [
           "ppad-nixpkgs"
         ]
       },
       "locked": {
-        "lastModified": 1783709539,
-        "narHash": "sha256-bXqV4/qYZFbZeG8PHlnr+PVyTZ3E0ZIi+mgCu49iamw=",
+        "lastModified": 1791625140,
+        "narHash": "sha256-DgMZKJlpLQcrNLSuzOM+bF2QQKsaVKigzSjkyOEockQ=",
         "ref": "master",
-        "rev": "507af14c14be9fbaa27992357aa25e40c443daee",
-        "revCount": 33,
+        "rev": "b4b4b507bf0be00435a15c448ef2366ed0c22581",
+        "revCount": 43,
         "type": "git",
         "url": "git://git.ppad.tech/bolt1.git"
       },
@@ -234,6 +237,37 @@
         "ref": "master",
         "type": "git",
         "url": "git://git.ppad.tech/bolt1.git"
+      }
+    },
+    "ppad-bolt9": {
+      "inputs": {
+        "flake-utils": [
+          "ppad-bolt9",
+          "ppad-nixpkgs",
+          "flake-utils"
+        ],
+        "nixpkgs": [
+          "ppad-bolt9",
+          "ppad-nixpkgs",
+          "nixpkgs"
+        ],
+        "ppad-nixpkgs": [
+          "ppad-nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1791624953,
+        "narHash": "sha256-DWafVJvu2LTXkAI/zH0Q0BqTrjLo0c7hyTvaW/9N0VM=",
+        "ref": "master",
+        "rev": "280946ab905a374c8c6d4a37678a4cc362551ab9",
+        "revCount": 39,
+        "type": "git",
+        "url": "git://git.ppad.tech/bolt9.git"
+      },
+      "original": {
+        "ref": "master",
+        "type": "git",
+        "url": "git://git.ppad.tech/bolt9.git"
       }
     },
     "ppad-fixed": {
@@ -496,11 +530,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1783709517,
-        "narHash": "sha256-iNne+qla9/ntt62Z+i9HR4QH99l/tUZCTD8i45sX0iY=",
+        "lastModified": 1791624263,
+        "narHash": "sha256-IJAffs2Cx/IjSTpNPubVlrzHLqRLUFu6XQp9yRIRbdU=",
         "ref": "master",
-        "rev": "0654d3f60af6e63109bf05224d15905fc5b70fc1",
-        "revCount": 31,
+        "rev": "65a561493940b59c5415b4b1409b4e32dae5c08f",
+        "revCount": 33,
         "type": "git",
         "url": "git://git.ppad.tech/tx.git"
       },
@@ -521,6 +555,7 @@
           "nixpkgs"
         ],
         "ppad-bolt1": "ppad-bolt1",
+        "ppad-bolt9": "ppad-bolt9",
         "ppad-nixpkgs": "ppad-nixpkgs",
         "ppad-ripemd160": "ppad-ripemd160",
         "ppad-secp256k1": "ppad-secp256k1",
