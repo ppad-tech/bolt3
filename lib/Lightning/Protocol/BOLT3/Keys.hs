@@ -1,4 +1,4 @@
-{-# OPTIONS_HADDOCK prune #-}
+{-# OPTIONS_HADDOCK hide #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE DeriveGeneric #-}
 
@@ -8,532 +8,624 @@
 -- License: MIT
 -- Maintainer: Jared Tobin <jared@ppad.tech>
 --
--- Per-commitment key derivation per BOLT #3.
---
--- Implements key derivation formulas:
---
--- @
--- pubkey = basepoint + SHA256(per_commitment_point || basepoint) * G
--- revocationpubkey = revocation_basepoint * SHA256(revocation_basepoint
---                      || per_commitment_point)
---                  + per_commitment_point * SHA256(per_commitment_point
---                      || revocation_basepoint)
--- @
+-- Key derivation, per-commitment secrets and commitment number
+-- obscuring, per BOLT #3.
 
 module Lightning.Protocol.BOLT3.Keys (
-    -- * Per-commitment point derivation
+    -- * Per-commitment points
     derive_per_commitment_point
   , derive_per_commitment_point'
 
-    -- * Key derivation
+    -- * Public keys
   , derive_pubkey
-  , derive_pubkey'
-  , derive_localpubkey
-  , derive_localpubkey'
-  , derive_local_htlcpubkey
-  , derive_local_htlcpubkey'
-  , derive_remote_htlcpubkey
-  , derive_remote_htlcpubkey'
-  , derive_local_delayedpubkey
-  , derive_local_delayedpubkey'
-  , derive_remote_delayedpubkey
-  , derive_remote_delayedpubkey'
-
-    -- * Revocation key derivation
   , derive_revocationpubkey
+  , CommitmentKeys(..)
+  , derive_commitment_keys
+  , derive_commitment_keys'
 
-    -- * Per-commitment secret generation
+    -- * Private keys
+  , derive_privkey
+  , derive_revocationprivkey
+
+    -- * Per-commitment secrets
   , generate_from_seed
-  , derive_secret
-
-    -- * Per-commitment secret storage
-  , SecretStore(..)
-  , SecretEntry(..)
-  , empty_store
+  , SecretStore
+  , empty_secret_store
   , insert_secret
   , derive_old_secret
+  , secret_store
+  , un_secret_store
 
     -- * Commitment number obscuring
   , obscured_commitment_number
   ) where
 
-import Data.Bits ((.&.), xor, shiftL, testBit, complementBit)
-import qualified Data.ByteString as BS
-import Data.Word (Word64)
-import GHC.Generics (Generic)
+import Control.DeepSeq (NFData(..))
 import qualified Crypto.Curve.Secp256k1 as S
 import qualified Crypto.Hash.SHA256 as SHA256
+import Data.Bits ((.&.), (.|.), complement, complementBit, shiftL, shiftR,
+                  testBit, xor)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Builder as BSB
+import qualified Data.ByteString.Lazy as BSL
+import qualified Data.ByteString.Unsafe as BU
+import Data.Word (Word64)
+import GHC.Generics (Generic)
+import Lightning.Protocol.BOLT1 (Point, PerCommitmentSecret)
+import qualified Lightning.Protocol.BOLT1 as BOLT1
 import Lightning.Protocol.BOLT3.Types
 
--- Per-commitment point derivation ----------------------------------------
+-- points ---------------------------------------------------------------------
 
--- | Derive the per-commitment point from a per-commitment secret.
+-- Serialize a secp256k1 point, failing on the point at infinity.
+to_point :: S.Projective -> Maybe Point
+to_point p
+  | p == S._CURVE_ZERO = Nothing
+  | otherwise          = case BOLT1.point (S.serialize_point p) of
+      Just pt -> Just pt
+      Nothing -> internal_error
+{-# INLINE to_point #-}
+
+-- per-commitment points ------------------------------------------------------
+
+-- | Derive the per-commitment point from a per-commitment secret:
 --
--- @per_commitment_point = per_commitment_secret * G@
+--   @per_commitment_point = per_commitment_secret * G@
 --
--- >>> let secret = PerCommitmentSecret (BS.replicate 32 0x01)
--- >>> derive_per_commitment_point secret
--- Just (PerCommitmentPoint ...)
+--   Fails if the secret is not a valid secp256k1 secret key.
+--
+--   >>> let Just s = BOLT1.per_commitment_secret (BS.pack [31, 30 .. 0])
+--   >>> let Just (PerCommitmentPoint p) = derive_per_commitment_point s
+--   >>> B16.encode (BOLT1.un_point p)
+--   "025f7117a78150fe2ef97db7cfc83bd57b2e2c0d0dd25eaf467a4a1c2a45ce1486"
 derive_per_commitment_point
   :: PerCommitmentSecret
   -> Maybe PerCommitmentPoint
-derive_per_commitment_point (PerCommitmentSecret sec) = do
-  sk <- S.parse_int256 sec
+derive_per_commitment_point s = do
+  sk <- S.parse_int256 (BOLT1.un_per_commitment_secret s)
   pk <- S.derive_pub sk
-  let !bs = S.serialize_point pk
-  pure $! PerCommitmentPoint (Point bs)
-{-# INLINE derive_per_commitment_point #-}
+  PerCommitmentPoint <$> to_point pk
 
--- | As 'derive_per_commitment_point', but takes a precomputed
---   secp256k1 'S.Context' so the @G@-base scalar mult uses wNAF.
---   Caller threads a single context across many calls.
---
--- >>> let !tex = S.precompute
--- >>> derive_per_commitment_point' tex secret
--- Just (PerCommitmentPoint ...)
+-- | As 'derive_per_commitment_point', but uses a precomputed
+--   'S.Context' to speed up the scalar multiplication.
 derive_per_commitment_point'
   :: S.Context
   -> PerCommitmentSecret
   -> Maybe PerCommitmentPoint
-derive_per_commitment_point' tex (PerCommitmentSecret sec) = do
-  sk <- S.parse_int256 sec
+derive_per_commitment_point' tex s = do
+  sk <- S.parse_int256 (BOLT1.un_per_commitment_secret s)
   pk <- S.derive_pub' tex sk
-  let !bs = S.serialize_point pk
-  pure $! PerCommitmentPoint (Point bs)
-{-# INLINE derive_per_commitment_point' #-}
+  PerCommitmentPoint <$> to_point pk
 
--- Key derivation ---------------------------------------------------------
+-- public keys ----------------------------------------------------------------
 
--- | Derive a pubkey from a basepoint and per-commitment point.
+-- | Derive a per-commitment public key from a basepoint:
 --
--- @pubkey = basepoint + SHA256(per_commitment_point || basepoint) * G@
+--   @pubkey = basepoint + SHA256(per_commitment_point || basepoint) * G@
 --
--- This is the general derivation formula used for localpubkey,
--- local_htlcpubkey, remote_htlcpubkey, local_delayedpubkey, and
--- remote_delayedpubkey.
+--   This gives @local_htlcpubkey@, @remote_htlcpubkey@,
+--   @local_delayedpubkey@ and the like, depending on the basepoint;
+--   'derive_commitment_keys' derives all of a commitment's keys at
+--   once.
 --
--- >>> derive_pubkey basepoint per_commitment_point
--- Just (Pubkey ...)
-derive_pubkey
-  :: Point             -- ^ basepoint
-  -> PerCommitmentPoint -- ^ per_commitment_point
-  -> Maybe Pubkey
-derive_pubkey (Point basepointBs) (PerCommitmentPoint (Point pcpBs)) = do
-  basepoint <- S.parse_point basepointBs
-  -- SHA256(per_commitment_point || basepoint)
-  let !h = SHA256.hash (pcpBs <> basepointBs)
-  -- Treat hash as scalar and multiply by G
-  tweak <- S.parse_int256 h
-  tweakPoint <- S.derive_pub tweak
-  -- Add basepoint + tweak*G
-  let !result = S.add basepoint tweakPoint
-      !bs = S.serialize_point result
-  pure $! Pubkey bs
+--   Fails if the basepoint is not on the curve.
+--
+--   >>> let Just s = BOLT1.per_commitment_secret (BS.pack [31, 30 .. 0])
+--   >>> let Just pcp = derive_per_commitment_point s
+--   >>> let Just b = BOLT1.per_commitment_secret (BS.pack [0 .. 31])
+--   >>> let Just (PerCommitmentPoint bp) = derive_per_commitment_point b
+--   >>> fmap (B16.encode . BOLT1.un_point) (derive_pubkey bp pcp)
+--   Just "0235f2dbfaa89b57ec7b055afe29849ef7ddfeb1cefdb9ebdc43f5494984db29e5"
+derive_pubkey :: Point -> PerCommitmentPoint -> Maybe Point
+derive_pubkey = derive_pubkey_with mul_g
 {-# INLINE derive_pubkey #-}
 
--- | As 'derive_pubkey', but takes a precomputed secp256k1
---   'S.Context'. The @tweak * G@ multiplication uses wNAF; this is
---   the highest-leverage variant since 'derive_pubkey' fires five
---   times per commitment-key derivation.
+-- Multiply the generator by a 32-byte scalar.
+mul_g :: BS.ByteString -> Maybe S.Projective
+mul_g bs = S.derive_pub =<< S.parse_int256 bs
+{-# INLINE mul_g #-}
+
+-- As 'mul_g', using a precomputed context.
+mul_g' :: S.Context -> BS.ByteString -> Maybe S.Projective
+mul_g' tex bs = S.derive_pub' tex =<< S.parse_int256 bs
+{-# INLINE mul_g' #-}
+
+derive_pubkey_with
+  :: (BS.ByteString -> Maybe S.Projective)
+  -> Point
+  -> PerCommitmentPoint
+  -> Maybe Point
+derive_pubkey_with mul bp (PerCommitmentPoint pcp) = do
+  let !bp_bs = BOLT1.un_point bp
+  base <- S.parse_point bp_bs
+  t    <- mul (SHA256.hash (BOLT1.un_point pcp <> bp_bs))
+  to_point (S.add base t)
+{-# INLINE derive_pubkey_with #-}
+
+-- | Derive a commitment's @revocationpubkey@ from the revocation
+--   basepoint of the party that will hold the revocation key, and the
+--   commitment owner's per-commitment point:
 --
--- >>> let !tex = S.precompute
--- >>> derive_pubkey' tex basepoint per_commitment_point
--- Just (Pubkey ...)
-derive_pubkey'
-  :: S.Context
-  -> Point             -- ^ basepoint
-  -> PerCommitmentPoint -- ^ per_commitment_point
-  -> Maybe Pubkey
-derive_pubkey'
-  tex
-  (Point basepointBs)
-  (PerCommitmentPoint (Point pcpBs)) = do
-    basepoint <- S.parse_point basepointBs
-    let !h = SHA256.hash (pcpBs <> basepointBs)
-    tweak <- S.parse_int256 h
-    tweakPoint <- S.derive_pub' tex tweak
-    let !result = S.add basepoint tweakPoint
-        !bs = S.serialize_point result
-    pure $! Pubkey bs
-{-# INLINE derive_pubkey' #-}
-
--- | Derive localpubkey from payment_basepoint and per_commitment_point.
+--   @
+--   revocationpubkey =
+--       revocation_basepoint
+--         * SHA256(revocation_basepoint || per_commitment_point)
+--     + per_commitment_point
+--         * SHA256(per_commitment_point || revocation_basepoint)
+--   @
 --
--- >>> derive_localpubkey payment_basepoint per_commitment_point
--- Just (LocalPubkey ...)
-derive_localpubkey
-  :: PaymentBasepoint
-  -> PerCommitmentPoint
-  -> Maybe LocalPubkey
-derive_localpubkey (PaymentBasepoint pt) pcp =
-  LocalPubkey <$> derive_pubkey pt pcp
-{-# INLINE derive_localpubkey #-}
-
--- | As 'derive_localpubkey', but uses 'derive_pubkey'' internally
---   (wNAF-accelerated).
-derive_localpubkey'
-  :: S.Context
-  -> PaymentBasepoint
-  -> PerCommitmentPoint
-  -> Maybe LocalPubkey
-derive_localpubkey' tex (PaymentBasepoint pt) pcp =
-  LocalPubkey <$> derive_pubkey' tex pt pcp
-{-# INLINE derive_localpubkey' #-}
-
--- | Derive local_htlcpubkey from htlc_basepoint and per_commitment_point.
+--   Fails if either point is not on the curve.
 --
--- >>> derive_local_htlcpubkey htlc_basepoint per_commitment_point
--- Just (LocalHtlcPubkey ...)
-derive_local_htlcpubkey
-  :: HtlcBasepoint
-  -> PerCommitmentPoint
-  -> Maybe LocalHtlcPubkey
-derive_local_htlcpubkey (HtlcBasepoint pt) pcp =
-  LocalHtlcPubkey <$> derive_pubkey pt pcp
-{-# INLINE derive_local_htlcpubkey #-}
-
--- | As 'derive_local_htlcpubkey', wNAF variant.
-derive_local_htlcpubkey'
-  :: S.Context
-  -> HtlcBasepoint
-  -> PerCommitmentPoint
-  -> Maybe LocalHtlcPubkey
-derive_local_htlcpubkey' tex (HtlcBasepoint pt) pcp =
-  LocalHtlcPubkey <$> derive_pubkey' tex pt pcp
-{-# INLINE derive_local_htlcpubkey' #-}
-
--- | Derive remote_htlcpubkey from htlc_basepoint and per_commitment_point.
---
--- >>> derive_remote_htlcpubkey htlc_basepoint per_commitment_point
--- Just (RemoteHtlcPubkey ...)
-derive_remote_htlcpubkey
-  :: HtlcBasepoint
-  -> PerCommitmentPoint
-  -> Maybe RemoteHtlcPubkey
-derive_remote_htlcpubkey (HtlcBasepoint pt) pcp =
-  RemoteHtlcPubkey <$> derive_pubkey pt pcp
-{-# INLINE derive_remote_htlcpubkey #-}
-
--- | As 'derive_remote_htlcpubkey', wNAF variant.
-derive_remote_htlcpubkey'
-  :: S.Context
-  -> HtlcBasepoint
-  -> PerCommitmentPoint
-  -> Maybe RemoteHtlcPubkey
-derive_remote_htlcpubkey' tex (HtlcBasepoint pt) pcp =
-  RemoteHtlcPubkey <$> derive_pubkey' tex pt pcp
-{-# INLINE derive_remote_htlcpubkey' #-}
-
--- | Derive local_delayedpubkey from delayed_payment_basepoint and
--- per_commitment_point.
---
--- >>> derive_local_delayedpubkey delayed_payment_basepoint per_commitment_point
--- Just (LocalDelayedPubkey ...)
-derive_local_delayedpubkey
-  :: DelayedPaymentBasepoint
-  -> PerCommitmentPoint
-  -> Maybe LocalDelayedPubkey
-derive_local_delayedpubkey (DelayedPaymentBasepoint pt) pcp =
-  LocalDelayedPubkey <$> derive_pubkey pt pcp
-{-# INLINE derive_local_delayedpubkey #-}
-
--- | As 'derive_local_delayedpubkey', wNAF variant.
-derive_local_delayedpubkey'
-  :: S.Context
-  -> DelayedPaymentBasepoint
-  -> PerCommitmentPoint
-  -> Maybe LocalDelayedPubkey
-derive_local_delayedpubkey' tex (DelayedPaymentBasepoint pt) pcp =
-  LocalDelayedPubkey <$> derive_pubkey' tex pt pcp
-{-# INLINE derive_local_delayedpubkey' #-}
-
--- | Derive remote_delayedpubkey from delayed_payment_basepoint and
--- per_commitment_point.
---
--- >>> derive_remote_delayedpubkey delayed_payment_basepoint pcp
--- Just (RemoteDelayedPubkey ...)
-derive_remote_delayedpubkey
-  :: DelayedPaymentBasepoint
-  -> PerCommitmentPoint
-  -> Maybe RemoteDelayedPubkey
-derive_remote_delayedpubkey (DelayedPaymentBasepoint pt) pcp =
-  RemoteDelayedPubkey <$> derive_pubkey pt pcp
-{-# INLINE derive_remote_delayedpubkey #-}
-
--- | As 'derive_remote_delayedpubkey', wNAF variant.
-derive_remote_delayedpubkey'
-  :: S.Context
-  -> DelayedPaymentBasepoint
-  -> PerCommitmentPoint
-  -> Maybe RemoteDelayedPubkey
-derive_remote_delayedpubkey' tex (DelayedPaymentBasepoint pt) pcp =
-  RemoteDelayedPubkey <$> derive_pubkey' tex pt pcp
-{-# INLINE derive_remote_delayedpubkey' #-}
-
--- Revocation key derivation ----------------------------------------------
-
--- Note: no @derive_revocationpubkey'@ is provided. The two scalar
--- mults inside this function are general (basepoint * scalar, not
--- @G * scalar@), so the wNAF table built by 'S.precompute' — which
--- stores multiples of the generator — doesn't apply.
-
--- | Derive revocationpubkey from revocation_basepoint and
--- per_commitment_point.
---
--- @
--- revocationpubkey = revocation_basepoint
---                      * SHA256(revocation_basepoint || per_commitment_point)
---                  + per_commitment_point
---                      * SHA256(per_commitment_point || revocation_basepoint)
--- @
---
--- >>> derive_revocationpubkey revocation_basepoint per_commitment_point
--- Just (RevocationPubkey ...)
+--   >>> let Just s = BOLT1.per_commitment_secret (BS.pack [31, 30 .. 0])
+--   >>> let Just pcp = derive_per_commitment_point s
+--   >>> let Just b = BOLT1.per_commitment_secret (BS.pack [0 .. 31])
+--   >>> let Just (PerCommitmentPoint p) = derive_per_commitment_point b
+--   >>> let Just r = derive_revocationpubkey (RevocationBasepoint p) pcp
+--   >>> (\(RevocationPubkey k) -> B16.encode (BOLT1.un_point k)) r
+--   "02916e326636d19c33f13e8c0c3a03dd157f332f3e99c317c141dd865eb01f8ff0"
 derive_revocationpubkey
   :: RevocationBasepoint
   -> PerCommitmentPoint
   -> Maybe RevocationPubkey
 derive_revocationpubkey
-  (RevocationBasepoint (Point rbpBs))
-  (PerCommitmentPoint (Point pcpBs)) = do
-    rbp <- S.parse_point rbpBs
-    pcp <- S.parse_point pcpBs
-    -- SHA256(revocation_basepoint || per_commitment_point)
-    let !h1 = SHA256.hash (rbpBs <> pcpBs)
-    -- SHA256(per_commitment_point || revocation_basepoint)
-    let !h2 = SHA256.hash (pcpBs <> rbpBs)
-    -- Multiply points by their respective scalars
-    s1 <- S.parse_int256 h1
-    s2 <- S.parse_int256 h2
-    p1 <- S.mul rbp s1  -- revocation_basepoint * h1
-    p2 <- S.mul pcp s2  -- per_commitment_point * h2
-    -- Add the two points
-    let !result = S.add p1 p2
-        !bs = S.serialize_point result
-    pure $! RevocationPubkey (Pubkey bs)
-{-# INLINE derive_revocationpubkey #-}
+  (RevocationBasepoint rbp)
+  (PerCommitmentPoint pcp) = do
+    let !rbp_bs = BOLT1.un_point rbp
+        !pcp_bs = BOLT1.un_point pcp
+    r  <- S.parse_point rbp_bs
+    p  <- S.parse_point pcp_bs
+    s1 <- S.parse_int256 (SHA256.hash (rbp_bs <> pcp_bs))
+    s2 <- S.parse_int256 (SHA256.hash (pcp_bs <> rbp_bs))
+    p1 <- S.mul r s1
+    p2 <- S.mul p s2
+    RevocationPubkey <$> to_point (S.add p1 p2)
 
--- Per-commitment secret generation ---------------------------------------
-
--- | Generate the I'th per-commitment secret from a seed.
---
--- Implements the generate_from_seed algorithm from BOLT #3:
---
--- @
--- generate_from_seed(seed, I):
---     P = seed
---     for B in 47 down to 0:
---         if B set in I:
---             flip(B) in P
---             P = SHA256(P)
---     return P
--- @
---
--- >>> generate_from_seed seed 281474976710655
--- <32-byte secret>
-generate_from_seed
-  :: BS.ByteString  -- ^ seed (32 bytes)
-  -> Word64         -- ^ index I (max 2^48 - 1)
-  -> BS.ByteString  -- ^ per-commitment secret (32 bytes)
-generate_from_seed seed idx = go 47 seed where
-  go :: Int -> BS.ByteString -> BS.ByteString
-  go !b !p
-    | b < 0 = p
-    | testBit idx b =
-        let !p' = flip_bit b p
-            !p'' = SHA256.hash p'
-        in  go (b - 1) p''
-    | otherwise = go (b - 1) p
-{-# INLINE generate_from_seed #-}
-
--- | Derive a secret from a base secret.
---
--- This is a generalization of generate_from_seed used for efficient
--- secret storage. Given a base secret whose index has bits..47 the same
--- as target index I, derive the I'th secret.
---
--- @
--- derive_secret(base, bits, I):
---     P = base
---     for B in bits - 1 down to 0:
---         if B set in I:
---             flip(B) in P
---             P = SHA256(P)
---     return P
--- @
-derive_secret
-  :: BS.ByteString  -- ^ base secret
-  -> Int            -- ^ bits (number of trailing bits to process)
-  -> Word64         -- ^ target index I
-  -> BS.ByteString  -- ^ derived secret
-derive_secret base bits idx = go (bits - 1) base where
-  go :: Int -> BS.ByteString -> BS.ByteString
-  go !b !p
-    | b < 0 = p
-    | testBit idx b =
-        let !p' = flip_bit b p
-            !p'' = SHA256.hash p'
-        in  go (b - 1) p''
-    | otherwise = go (b - 1) p
-{-# INLINE derive_secret #-}
-
--- | Flip bit B in a 32-byte bytestring.
---
--- "flip(B)" alternates the (B mod 8) bit of the (B div 8) byte.
-flip_bit :: Int -> BS.ByteString -> BS.ByteString
-flip_bit b bs =
-  let !byteIdx = b `div` 8
-      !bitIdx = b `mod` 8
-      !len = BS.length bs
-  in  if byteIdx >= len
-      then bs
-      else
-        let !prefix = BS.take byteIdx bs
-            !byte = BS.index bs byteIdx
-            !byte' = complementBit byte bitIdx
-            !suffix = BS.drop (byteIdx + 1) bs
-        in  prefix <> BS.singleton byte' <> suffix
-{-# INLINE flip_bit #-}
-
--- Per-commitment secret storage ------------------------------------------
-
--- | Entry in the secret store: (bucket, index, secret).
-data SecretEntry = SecretEntry
-  { se_bucket :: {-# UNPACK #-} !Int
-  , se_index  :: {-# UNPACK #-} !Word64
-  , se_secret :: !BS.ByteString
+-- | The keys a commitment transaction's scripts use.
+data CommitmentKeys = CommitmentKeys
+  { ck_revocation_pubkey :: !RevocationPubkey
+  , ck_local_delayed     :: !LocalDelayedPubkey
+  , ck_local_htlc        :: !LocalHtlcPubkey
+  , ck_remote_htlc       :: !RemoteHtlcPubkey
+  , ck_remote_payment    :: !RemotePubkey
+  , ck_local_funding     :: !FundingPubkey
+  , ck_remote_funding    :: !FundingPubkey
   } deriving (Eq, Show, Generic)
 
--- | Compact storage for per-commitment secrets.
---
--- Stores up to 49 (value, index) pairs, allowing efficient derivation
--- of any previously-received secret. This is possible because for a
--- given secret on a 2^X boundary, all secrets up to the next 2^X
--- boundary can be derived from it.
-newtype SecretStore = SecretStore { unSecretStore :: [SecretEntry] }
-  deriving (Eq, Show, Generic)
+instance NFData CommitmentKeys
 
--- | Empty secret store.
-empty_store :: SecretStore
-empty_store = SecretStore []
-{-# INLINE empty_store #-}
-
--- | Determine which bucket to store a secret in based on its index.
+-- | Derive the keys for a commitment transaction from both parties'
+--   basepoints and funding pubkeys, and the commitment owner's
+--   per-commitment point.
 --
--- Counts trailing zeros in the index. Returns 0-47 for normal indices,
--- or 48 if index is 0 (the seed).
-where_to_put_secret :: Word64 -> Int
-where_to_put_secret idx = go 0 where
+--   The owner is the "local" party: its delayed and HTLC basepoints
+--   give @local_delayedpubkey@ and @local_htlcpubkey@, while the other
+--   party's revocation and HTLC basepoints give @revocationpubkey@ and
+--   @remote_htlcpubkey@. As every supported 'CommitmentFormat' uses
+--   @option_static_remotekey@, @remotepubkey@ is the other party's
+--   @payment_basepoint@.
+--
+--   Fails if a basepoint it derives a key from, or the per-commitment
+--   point, is not on the curve.
+derive_commitment_keys
+  :: Basepoints          -- ^ the owner's basepoints
+  -> FundingPubkey       -- ^ the owner's funding pubkey
+  -> Basepoints          -- ^ the other party's basepoints
+  -> FundingPubkey       -- ^ the other party's funding pubkey
+  -> PerCommitmentPoint  -- ^ the owner's per-commitment point
+  -> Maybe CommitmentKeys
+derive_commitment_keys = derive_commitment_keys_with mul_g
+
+-- | As 'derive_commitment_keys', but uses a precomputed 'S.Context'
+--   to speed up the scalar multiplications.
+derive_commitment_keys'
+  :: S.Context
+  -> Basepoints
+  -> FundingPubkey
+  -> Basepoints
+  -> FundingPubkey
+  -> PerCommitmentPoint
+  -> Maybe CommitmentKeys
+derive_commitment_keys' tex = derive_commitment_keys_with (mul_g' tex)
+
+derive_commitment_keys_with
+  :: (BS.ByteString -> Maybe S.Projective)
+  -> Basepoints
+  -> FundingPubkey
+  -> Basepoints
+  -> FundingPubkey
+  -> PerCommitmentPoint
+  -> Maybe CommitmentKeys
+derive_commitment_keys_with mul local local_fund remote remote_fund pcp = do
+  let DelayedPaymentBasepoint local_delayed_bp = bp_delayed_payment local
+      HtlcBasepoint local_htlc_bp = bp_htlc local
+      HtlcBasepoint remote_htlc_bp = bp_htlc remote
+      PaymentBasepoint remote_payment_bp = bp_payment remote
+  revocation   <- derive_revocationpubkey (bp_revocation remote) pcp
+  delayed      <- derive_pubkey_with mul local_delayed_bp pcp
+  local_htlc   <- derive_pubkey_with mul local_htlc_bp pcp
+  remote_htlc  <- derive_pubkey_with mul remote_htlc_bp pcp
+  pure CommitmentKeys
+    { ck_revocation_pubkey = revocation
+    , ck_local_delayed     = LocalDelayedPubkey delayed
+    , ck_local_htlc        = LocalHtlcPubkey local_htlc
+    , ck_remote_htlc       = RemoteHtlcPubkey remote_htlc
+    , ck_remote_payment    = RemotePubkey remote_payment_bp
+    , ck_local_funding     = local_fund
+    , ck_remote_funding    = remote_fund
+    }
+
+-- private keys ---------------------------------------------------------------
+
+-- | Derive the private key for a per-commitment public key from its
+--   basepoint secret:
+--
+--   @privkey = basepoint_secret + SHA256(per_commitment_point || basepoint)@
+--
+--   where @basepoint = basepoint_secret * G@. The result is the secret
+--   key for @'derive_pubkey' basepoint per_commitment_point@.
+--
+--   The arithmetic on the secret is constant-time. Fails (with
+--   negligible probability) if the result is zero.
+--
+--   >>> let Just s = BOLT1.per_commitment_secret (BS.pack [31, 30 .. 0])
+--   >>> let Just pcp = derive_per_commitment_point s
+--   >>> let Just k = seckey (BS.pack [0 .. 31])
+--   >>> fmap (B16.encode . un_seckey) (derive_privkey k pcp)
+--   Just "cbced912d3b21bf196a766651e436aff192362621ce317704ea2f75d87e7be0f"
+derive_privkey :: Seckey -> PerCommitmentPoint -> Maybe Seckey
+derive_privkey (Seckey sk_bs) (PerCommitmentPoint pcp) = do
+  sk <- S.parse_int256 sk_bs
+  bp <- to_point =<< S.derive_pub sk
+  let !h = SHA256.hash (BOLT1.un_point pcp <> BOLT1.un_point bp)
+      !r = add_mod_n (w4 sk_bs) (reduce_n (w4 h))
+  to_seckey r
+
+-- | Derive a commitment's @revocationprivkey@ from the revocation
+--   basepoint secret and the commitment's (revealed) per-commitment
+--   secret:
+--
+--   @
+--   revocationprivkey =
+--       revocation_basepoint_secret
+--         * SHA256(revocation_basepoint || per_commitment_point)
+--     + per_commitment_secret
+--         * SHA256(per_commitment_point || revocation_basepoint)
+--   @
+--
+--   The result is the secret key for the 'derive_revocationpubkey'
+--   of the corresponding points.
+--
+--   The arithmetic on the secrets is constant-time. Fails if the
+--   per-commitment secret is not a valid secret key, or (with
+--   negligible probability) if the result is zero.
+--
+--   >>> let Just s = BOLT1.per_commitment_secret (BS.pack [31, 30 .. 0])
+--   >>> let Just k = seckey (BS.pack [0 .. 31])
+--   >>> fmap (B16.encode . un_seckey) (derive_revocationprivkey k s)
+--   Just "d09ffff62ddb2297ab000cc85bcb4283fdeb6aa052affbc9dddcf33b61078110"
+derive_revocationprivkey
+  :: Seckey               -- ^ revocation basepoint secret
+  -> PerCommitmentSecret  -- ^ per-commitment secret
+  -> Maybe Seckey
+derive_revocationprivkey (Seckey rbs_bs) pcs = do
+  let !pcs_bs = BOLT1.un_per_commitment_secret pcs
+  rbs <- S.parse_int256 rbs_bs
+  ps  <- S.parse_int256 pcs_bs
+  rbp <- to_point =<< S.derive_pub rbs
+  pcp <- to_point =<< S.derive_pub ps
+  let !rbp_bs = BOLT1.un_point rbp
+      !pcp_bs = BOLT1.un_point pcp
+      !h1 = reduce_n (w4 (SHA256.hash (rbp_bs <> pcp_bs)))
+      !h2 = reduce_n (w4 (SHA256.hash (pcp_bs <> rbp_bs)))
+      !r  = add_mod_n (mul_mod_n (w4 rbs_bs) h1) (mul_mod_n (w4 pcs_bs) h2)
+  to_seckey r
+
+-- constant-time arithmetic modulo the secp256k1 group order ------------------
+
+-- A 256-bit integer as four 64-bit limbs, least significant first.
+data W4 = W4
+  {-# UNPACK #-} !Word64
+  {-# UNPACK #-} !Word64
+  {-# UNPACK #-} !Word64
+  {-# UNPACK #-} !Word64
+
+-- The secp256k1 group order n.
+_N :: W4
+_N = W4 0xBFD25E8CD0364141 0xBAAEDCE6AF48A03B
+        0xFFFFFFFFFFFFFFFE 0xFFFFFFFFFFFFFFFF
+
+-- Read 32 big-endian bytes (the length is checked by the caller).
+w4 :: BS.ByteString -> W4
+w4 bs = W4 (limb 24) (limb 16) (limb 8) (limb 0) where
+  limb :: Int -> Word64
+  limb o = go 0 0 where
+    go !acc !i
+      | i == 8    = acc
+      | otherwise =
+          go ((acc `shiftL` 8) .|. fromIntegral (BU.unsafeIndex bs (o + i)))
+             (i + 1)
+
+-- Write 32 big-endian bytes.
+unw4 :: W4 -> BS.ByteString
+unw4 (W4 a b c d) = BSL.toStrict . BSB.toLazyByteString $
+  BSB.word64BE d <> BSB.word64BE c <> BSB.word64BE b <> BSB.word64BE a
+
+-- A valid secret key from a result in [0, n), failing on zero.
+to_seckey :: W4 -> Maybe Seckey
+to_seckey r@(W4 a b c d)
+  | (a .|. b .|. c .|. d) == 0 = Nothing
+  | otherwise                  = Just (Seckey (unw4 r))
+
+-- a + b + c, for a carry c in {0, 1}; returns the sum and carry out.
+adc :: Word64 -> Word64 -> Word64 -> (Word64, Word64)
+adc a b c =
+  let !s = a + b + c
+      !o = ((a .&. b) .|. ((a .|. b) .&. complement s)) `shiftR` 63
+  in  (s, o)
+{-# INLINE adc #-}
+
+-- a - b - c, for a borrow c in {0, 1}; returns the difference and
+-- borrow out.
+sbb :: Word64 -> Word64 -> Word64 -> (Word64, Word64)
+sbb a b c =
+  let !s = a - b - c
+      !o = ((complement a .&. b) .|. (complement (a `xor` b) .&. s))
+             `shiftR` 63
+  in  (s, o)
+{-# INLINE sbb #-}
+
+add4 :: W4 -> W4 -> (W4, Word64)
+add4 (W4 a0 a1 a2 a3) (W4 b0 b1 b2 b3) =
+  let !(s0, c0) = adc a0 b0 0
+      !(s1, c1) = adc a1 b1 c0
+      !(s2, c2) = adc a2 b2 c1
+      !(s3, c3) = adc a3 b3 c2
+  in  (W4 s0 s1 s2 s3, c3)
+{-# INLINE add4 #-}
+
+sub4 :: W4 -> W4 -> (W4, Word64)
+sub4 (W4 a0 a1 a2 a3) (W4 b0 b1 b2 b3) =
+  let !(s0, c0) = sbb a0 b0 0
+      !(s1, c1) = sbb a1 b1 c0
+      !(s2, c2) = sbb a2 b2 c1
+      !(s3, c3) = sbb a3 b3 c2
+  in  (W4 s0 s1 s2 s3, c3)
+{-# INLINE sub4 #-}
+
+-- x if the bit is 1, y if it is 0.
+select :: Word64 -> W4 -> W4 -> W4
+select bit (W4 x0 x1 x2 x3) (W4 y0 y1 y2 y3) =
+  let !m = negate bit
+      f x y = (x .&. m) .|. (y .&. complement m)
+  in  W4 (f x0 y0) (f x1 y1) (f x2 y2) (f x3 y3)
+{-# INLINE select #-}
+
+-- x mod n, for any 256-bit x (one subtraction suffices, as 2^256 < 2n).
+reduce_n :: W4 -> W4
+reduce_n x =
+  let !(t, borrow) = sub4 x _N
+  in  select borrow x t
+
+-- a + b mod n, for a, b < n.
+add_mod_n :: W4 -> W4 -> W4
+add_mod_n a b =
+  let !(s, carry)  = add4 a b
+      !(t, borrow) = sub4 s _N
+  in  select (carry .|. (borrow `xor` 1)) t s
+
+-- a * b mod n, for a, b < n, by double-and-add over all 256 bits of b.
+mul_mod_n :: W4 -> W4 -> W4
+mul_mod_n a (W4 b0 b1 b2 b3) = go (255 :: Int) (W4 0 0 0 0) where
+  go !i !acc
+    | i < 0     = acc
+    | otherwise =
+        let !d   = add_mod_n acc acc
+            !bit = (limb (i `shiftR` 6) `shiftR` (i .&. 63)) .&. 1
+        in  go (i - 1) (select bit (add_mod_n d a) d)
+  limb :: Int -> Word64
+  limb j = case j of
+    0 -> b0
+    1 -> b1
+    2 -> b2
+    _ -> b3
+
+-- per-commitment secrets -----------------------------------------------------
+
+-- Wrap a 32-byte value as a per-commitment secret.
+to_secret :: BS.ByteString -> PerCommitmentSecret
+to_secret bs = case BOLT1.per_commitment_secret bs of
+  Just s  -> s
+  Nothing -> internal_error
+{-# INLINE to_secret #-}
+
+-- Flip bit b (< 256) of a 32-byte value: the (b mod 8) bit of the
+-- (b div 8) byte.
+flip_bit :: Int -> BS.ByteString -> BS.ByteString
+flip_bit b bs =
+  let !(pre, post) = BS.splitAt (b `shiftR` 3) bs
+  in  case BS.uncons post of
+        Just (h, t) -> pre <> BS.cons (complementBit h (b .&. 7)) t
+        Nothing     -> bs
+{-# INLINE flip_bit #-}
+
+-- The spec's derive_secret: the secret for index i, from a base
+-- secret whose index agrees with i in bits 47 down to 'bits'.
+derive_secret :: BS.ByteString -> Int -> Word64 -> BS.ByteString
+derive_secret base bits i = go (bits - 1) base where
+  go !b !p
+    | b < 0       = p
+    | testBit i b = go (b - 1) (SHA256.hash (flip_bit b p))
+    | otherwise   = go (b - 1) p
+
+-- | Generate the per-commitment secret with a given index from a seed,
+--   per BOLT #3's @generate_from_seed@.
+--
+--   >>> let Just s = seed (BS.replicate 32 0xff)
+--   >>> let Just i = secret_index 281474976710655
+--   >>> B16.encode (BOLT1.un_per_commitment_secret (generate_from_seed s i))
+--   "7cc854b54e3e0dcdb010d7a3fee464a9687be6e8db3be6854c475621e007a5dc"
+generate_from_seed :: Seed -> SecretIndex -> PerCommitmentSecret
+generate_from_seed (Seed s) (SecretIndex i) = to_secret (derive_secret s 48 i)
+
+-- | Compact storage for the per-commitment secrets received from a
+--   peer, per BOLT #3's "Efficient Per-commitment Secret Storage".
+--
+--   Holds at most 49 secrets, from which every secret received so far
+--   can be derived. This is secret material: its 'Show' instance is
+--   redacted, and it has no 'Eq' instance.
+newtype SecretStore = SecretStore [Entry]
+
+-- A stored secret: its bucket (the number of trailing zeros of its
+-- index), index, and value. Kept in ascending bucket order.
+data Entry = Entry
+  {-# UNPACK #-} !Int
+  {-# UNPACK #-} !Word64
+  !BS.ByteString
+
+instance Show SecretStore where
+  showsPrec d _ = showParen (d > 10) $
+    showString "SecretStore <redacted>"
+
+instance NFData SecretStore where
+  rnf (SecretStore es) = rnf_entries es where
+    rnf_entries [] = ()
+    rnf_entries (Entry _ _ s : rest) = rnf s `seq` rnf_entries rest
+
+-- | The empty 'SecretStore'.
+empty_secret_store :: SecretStore
+empty_secret_store = SecretStore []
+
+-- The bucket for an index: its number of trailing zeros (48 for 0).
+bucket_of :: Word64 -> Int
+bucket_of i = go 0 where
   go !b
-    | b > 47 = 48  -- index 0, this is the seed
-    | testBit idx b = b
-    | otherwise = go (b + 1)
-{-# INLINE where_to_put_secret #-}
+    | b > 47      = 48
+    | testBit i b = b
+    | otherwise   = go (b + 1)
 
--- | Insert a secret into the store, validating against existing secrets.
+-- Whether a secret at index j in bucket b can derive index i.
+can_derive :: Int -> Word64 -> Word64 -> Bool
+can_derive b j i = i .&. complement ((1 `shiftL` b) - 1) == j
+{-# INLINE can_derive #-}
+
+-- | Add a newly received per-commitment secret to the store, per
+--   BOLT #3's @insert_secret@.
 --
--- Implements insert_secret from BOLT #3: the secret is checked against
--- every known secret in a lower bucket, then replaces the entry in its
--- own bucket. Entries in all other buckets are kept, so that every
--- previously-inserted secret remains derivable via 'derive_old_secret'.
--- Entries are kept in ascending bucket order.
+--   Fails if a stored secret cannot be derived from the new one, i.e.
+--   if the secrets were not generated from the same seed (or were not
+--   received in order).
 --
--- Returns Nothing if the secret is not 32 bytes, if the index is not
--- below 2^48, or if a known secret doesn't derive correctly from the
--- new one (indicating the secrets weren't generated from the same
--- seed).
---
--- >>> insert_secret secret 281474976710655 empty_store
--- Just (SecretStore ...)
+--   >>> let Just s = seed (BS.replicate 32 0xff)
+--   >>> let Just i = secret_index 281474976710655
+--   >>> let secret = generate_from_seed s i
+--   >>> let Just st = insert_secret secret i empty_secret_store
+--   >>> fmap (== secret) (derive_old_secret i st)
+--   Just True
 insert_secret
-  :: BS.ByteString  -- ^ secret (32 bytes)
-  -> Word64         -- ^ index (max 2^48 - 1)
-  -> SecretStore    -- ^ current store
+  :: PerCommitmentSecret
+  -> SecretIndex
+  -> SecretStore
   -> Maybe SecretStore
-insert_secret secret idx (SecretStore known)
-  | BS.length secret /= 32 = Nothing
-  | idx > 0xFFFFFFFFFFFF = Nothing
+insert_secret pcs (SecretIndex i) (SecretStore known)
   | all derives known = Just $! SecretStore (put known)
-  | otherwise = Nothing
+  | otherwise         = Nothing
   where
-    !bucket = where_to_put_secret idx
-    !entry = SecretEntry bucket idx secret
+    !s = BOLT1.un_per_commitment_secret pcs
+    !b = bucket_of i
+    !e = Entry b i s
 
-    -- known secrets in lower buckets must derive from the new one
-    derives (SecretEntry b knownIdx knownSecret)
-      | b < bucket = derive_secret secret bucket knownIdx == knownSecret
+    -- every secret in a lower bucket must derive from the new one
+    derives (Entry kb ki ks)
+      | kb < b    = to_secret (derive_secret s b ki) == to_secret ks
       | otherwise = True
 
-    -- replace this bucket's entry, preserving ascending bucket order
-    put [] = [entry]
-    put (e : es) = case compare (se_bucket e) bucket of
-      LT -> e : put es
-      EQ -> entry : es
-      GT -> entry : e : es
-{-# INLINE insert_secret #-}
+    -- replace this bucket's entry, keeping ascending bucket order
+    put [] = [e]
+    put (k@(Entry kb _ _) : ks) = case compare kb b of
+      LT -> k : put ks
+      EQ -> e : ks
+      GT -> e : k : ks
 
--- | Derive a previously-received secret from the store.
---
--- Iterates over known secrets to find one whose index is a prefix of
--- the target index, then derives the target secret from it.
---
--- >>> derive_old_secret 281474976710654 store
--- Just <32-byte secret>
+-- | Derive a previously received per-commitment secret from the
+--   store. Fails if the index has not been received.
 derive_old_secret
-  :: Word64       -- ^ target index
-  -> SecretStore  -- ^ store
-  -> Maybe BS.ByteString
-derive_old_secret targetIdx (SecretStore known) = go known where
-  go :: [SecretEntry] -> Maybe BS.ByteString
+  :: SecretIndex
+  -> SecretStore
+  -> Maybe PerCommitmentSecret
+derive_old_secret (SecretIndex i) (SecretStore known) = go known where
   go [] = Nothing
-  go (SecretEntry bucket knownIdx knownSecret : rest) =
-    -- Mask off the non-zero prefix of the index using the entry's bucket
-    let !mask = complement ((1 `shiftL` bucket) - 1)
-    in  if (targetIdx .&. mask) == knownIdx
-        then Just $! derive_secret knownSecret bucket targetIdx
-        else go rest
+  go (Entry b j s : rest)
+    | can_derive b j i = Just $! to_secret (derive_secret s b i)
+    | otherwise        = go rest
 
-  complement :: Word64 -> Word64
-  complement x = x `xor` 0xFFFFFFFFFFFFFFFF
-{-# INLINE derive_old_secret #-}
-
--- Commitment number obscuring --------------------------------------------
-
--- | Calculate the obscured commitment number.
+-- | Rebuild a 'SecretStore' from its entries, e.g. as produced by
+--   'un_secret_store'.
 --
--- The 48-bit commitment number is obscured by XOR with the lower 48 bits
--- of SHA256(payment_basepoint from open_channel
---         || payment_basepoint from accept_channel).
+--   Fails if two entries share a bucket (i.e. their indices have the
+--   same number of trailing zeros), or if an entry contradicts another
+--   from which it can be derived.
+secret_store
+  :: [(SecretIndex, PerCommitmentSecret)]
+  -> Maybe SecretStore
+secret_store = go [] where
+  go acc [] = Just (SecretStore acc)
+  go acc ((SecretIndex i, pcs) : rest) = do
+    let !e = Entry (bucket_of i) i (BOLT1.un_per_commitment_secret pcs)
+    acc' <- place e acc
+    go acc' rest
+
+  -- insert in ascending bucket order, checking consistency with the
+  -- entries already placed
+  place e@(Entry b i s) es
+    | all (consistent e) es = put es
+    | otherwise             = Nothing
+    where
+      put [] = Just [e]
+      put (k@(Entry kb _ _) : ks) = case compare kb b of
+        LT -> (k :) <$> put ks
+        EQ -> Nothing
+        GT -> Just (e : k : ks)
+      consistent _ (Entry kb ki ks)
+        | kb > b && can_derive kb ki i =
+            to_secret (derive_secret ks kb i) == to_secret s
+        | kb < b && can_derive b i ki =
+            to_secret (derive_secret s b ki) == to_secret ks
+        | otherwise = True
+
+-- | The entries of a 'SecretStore', for persistence; see
+--   'secret_store'.
+un_secret_store :: SecretStore -> [(SecretIndex, PerCommitmentSecret)]
+un_secret_store (SecretStore es) =
+  [ (SecretIndex i, to_secret s) | Entry _ i s <- es ]
+
+-- commitment number obscuring ------------------------------------------------
+
+-- | Obscure a commitment number, by XOR with the lower 48 bits of
 --
--- >>> obscured_commitment_number local_payment_bp remote_payment_bp cn
--- <obscured value>
+--   @SHA256(payment_basepoint from open_channel
+--           || payment_basepoint from accept_channel)@
+--
+--   As XOR is an involution, applying this to an obscured number
+--   recovers the commitment number. ('build_commitment_tx' obscures
+--   the commitment number itself.)
+--
+--   >>> let pay h = fmap PaymentBasepoint (BOLT1.point =<< B16.decode h)
+--   >>> let o1 = "034f355bdcb7cc0af728ef3cceb9615d9068"
+--   >>> let Just o = pay (o1 <> "4bb5b2ca5f859ab0f0b704075871aa")
+--   >>> let a1 = "032c0b7cf95324a07d05398b240174dc0c2b"
+--   >>> let Just a = pay (a1 <> "e444d96b159aa6c7f7b1e668680991")
+--   >>> fmap (obscured_commitment_number o a) (commitment_number 42)
+--   Just 48035859142974
 obscured_commitment_number
   :: PaymentBasepoint   -- ^ opener's payment_basepoint
   -> PaymentBasepoint   -- ^ accepter's payment_basepoint
-  -> CommitmentNumber   -- ^ commitment number (48-bit)
-  -> Word64             -- ^ obscured commitment number
+  -> CommitmentNumber
+  -> Word64
 obscured_commitment_number
-  (PaymentBasepoint (Point openerBs))
-  (PaymentBasepoint (Point accepterBs))
-  (CommitmentNumber cn) =
-    let !h = SHA256.hash (openerBs <> accepterBs)
-        -- Extract lower 48 bits (6 bytes) from the hash
-        !lower48 = extractLower48 h
-        -- Mask commitment number to 48 bits
-        !cn48 = cn .&. 0xFFFFFFFFFFFF
-    in  cn48 `xor` lower48
-{-# INLINE obscured_commitment_number #-}
-
--- | Extract lower 48 bits from a 32-byte hash.
---
--- Takes bytes 26-31 (last 6 bytes) and interprets as big-endian Word64.
-extractLower48 :: BS.ByteString -> Word64
-extractLower48 h =
-  let !b0 = fromIntegral (BS.index h 26) `shiftL` 40
-      !b1 = fromIntegral (BS.index h 27) `shiftL` 32
-      !b2 = fromIntegral (BS.index h 28) `shiftL` 24
-      !b3 = fromIntegral (BS.index h 29) `shiftL` 16
-      !b4 = fromIntegral (BS.index h 30) `shiftL` 8
-      !b5 = fromIntegral (BS.index h 31)
-  in  b0 + b1 + b2 + b3 + b4 + b5
-{-# INLINE extractLower48 #-}
+  (PaymentBasepoint opener)
+  (PaymentBasepoint accepter)
+  cn =
+    let !h = SHA256.hash (BOLT1.un_point opener <> BOLT1.un_point accepter)
+        !mask = BS.foldl' (\acc x -> (acc `shiftL` 8) .|. fromIntegral x) 0
+                  (BS.drop 26 h)
+    in  un_commitment_number cn `xor` mask

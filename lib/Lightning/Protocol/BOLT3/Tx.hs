@@ -1,4 +1,4 @@
-{-# OPTIONS_HADDOCK prune #-}
+{-# OPTIONS_HADDOCK hide #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE DeriveGeneric #-}
 
@@ -8,667 +8,562 @@
 -- License: MIT
 -- Maintainer: Jared Tobin <jared@ppad.tech>
 --
--- Transaction assembly for BOLT #3.
---
--- Constructs:
---
--- * Commitment transactions
--- * HTLC-timeout transactions
--- * HTLC-success transactions
--- * Closing transactions
+-- Commitment, HTLC and closing transactions, per BOLT #3.
 
 module Lightning.Protocol.BOLT3.Tx (
-    -- * Commitment transaction
-    CommitmentTx(..)
-  , CommitmentContext(..)
-  , CommitmentKeys(..)
+    -- * Commitment transactions
+    CommitmentContext(..)
+  , CommitmentTx(..)
+  , CommitmentOutput(..)
+  , OutputType(..)
   , build_commitment_tx
 
     -- * HTLC transactions
-  , HTLCTx(..)
   , HTLCContext(..)
-  , build_htlc_timeout_tx
-  , build_htlc_success_tx
+  , HTLCTx(..)
+  , build_htlc_tx
 
-    -- * Closing transaction
+    -- * Closing transactions
   , ClosingTx(..)
+  , ClosingOutput(..)
   , ClosingContext(..)
+  , ClosingOutputs(..)
   , build_closing_tx
+  , LegacyClosingContext(..)
   , build_legacy_closing_tx
 
-    -- * Conversion to ppad-tx
-  , commitment_to_tx
-  , htlc_to_tx
-  , closing_to_tx
-
-    -- * Transaction outputs
-  , TxOutput(..)
-  , OutputType(..)
-
-    -- * Fee calculation
+    -- * Fees
   , commitment_fee
   , htlc_timeout_fee
   , htlc_success_fee
-  , commitment_weight
 
     -- * Trimming
-  , is_trimmed
-  , trimmed_htlcs
-  , untrimmed_htlcs
   , htlc_trim_threshold
+  , is_trimmed
 
-    -- * Output ordering
-  , sort_outputs
+    -- * Serialization
+  , commitment_to_tx
+  , htlc_to_tx
+  , closing_to_tx
+  , encode_commitment_tx
+  , encode_htlc_tx
+  , encode_closing_tx
   ) where
 
+import Bitcoin.Prim.Tx (OutPoint(..), TxId)
 import qualified Bitcoin.Prim.Tx as BT
-import Data.Bits ((.&.), (.|.), shiftL, shiftR)
+import Control.DeepSeq (NFData)
+import Data.Bits ((.&.), (.|.), shiftR)
 import qualified Data.ByteString as BS
 import Data.List (sortBy)
-import Data.List.NonEmpty (NonEmpty(..), nonEmpty)
+import Data.List.NonEmpty (NonEmpty(..))
+import qualified Data.List.NonEmpty as NE
+import Data.Maybe (fromMaybe)
 import Data.Word (Word32, Word64)
 import GHC.Generics (Generic)
+import Lightning.Protocol.BOLT1 (Satoshi, MilliSatoshi)
+import qualified Lightning.Protocol.BOLT1 as BOLT1
 import Lightning.Protocol.BOLT3.Keys
 import Lightning.Protocol.BOLT3.Scripts
 import Lightning.Protocol.BOLT3.Types
 
--- transaction outputs ---------------------------------------------------------
+-- commitment transactions ----------------------------------------------------
 
--- | Type of output in a commitment transaction.
+-- | What a commitment transaction output pays.
 data OutputType
   = OutputToLocal
   | OutputToRemote
   | OutputLocalAnchor
   | OutputRemoteAnchor
-  | OutputOfferedHTLC  {-# UNPACK #-} !CltvExpiry
-  | OutputReceivedHTLC {-# UNPACK #-} !CltvExpiry
+  | OutputHTLC !HTLC
+    -- ^ an offered or received HTLC (per its 'htlc_direction')
   deriving (Eq, Show, Generic)
 
--- | A transaction output with value, script, and type information.
-data TxOutput = TxOutput
-  { txout_value     :: {-# UNPACK #-} !Satoshi
-  , txout_script    :: !Script
-  , txout_type      :: !OutputType
+instance NFData OutputType
+
+-- | A commitment transaction output.
+data CommitmentOutput = CommitmentOutput
+  { co_value  :: {-# UNPACK #-} !Satoshi
+  , co_script :: !Script     -- ^ scriptPubKey
+  , co_type   :: !OutputType
   } deriving (Eq, Show, Generic)
 
--- commitment transaction ------------------------------------------------------
+instance NFData CommitmentOutput
 
--- | Derived keys needed for commitment transaction outputs.
-data CommitmentKeys = CommitmentKeys
-  { ck_revocation_pubkey   :: !RevocationPubkey
-  , ck_local_delayed       :: !LocalDelayedPubkey
-  , ck_local_htlc          :: !LocalHtlcPubkey
-  , ck_remote_htlc         :: !RemoteHtlcPubkey
-  , ck_local_payment       :: !LocalPubkey
-  , ck_remote_payment      :: !RemotePubkey
-  , ck_local_funding       :: !FundingPubkey
-  , ck_remote_funding      :: !FundingPubkey
-  } deriving (Eq, Show, Generic)
-
--- | Context for building a commitment transaction.
+-- | The parameters of a commitment transaction, from the point of view
+--   of its owner (the "local" party, whose outputs are delayed).
 data CommitmentContext = CommitmentContext
-  { cc_funding_outpoint    :: !OutPoint
-  , cc_commitment_number   :: !CommitmentNumber
-  , cc_local_payment_bp    :: !PaymentBasepoint
-  , cc_remote_payment_bp   :: !PaymentBasepoint
-  , cc_to_self_delay       :: !ToSelfDelay
-  , cc_dust_limit          :: !DustLimit
-  , cc_feerate             :: !FeeratePerKw
-  , cc_features            :: !ChannelFeatures
-  , cc_is_funder           :: !Bool
-  , cc_to_local_msat       :: !MilliSatoshi
-  , cc_to_remote_msat      :: !MilliSatoshi
-  , cc_htlcs               :: ![HTLC]
-  , cc_keys                :: !CommitmentKeys
+  { cc_funding_outpoint  :: {-# UNPACK #-} !OutPoint
+  , cc_commitment_number :: {-# UNPACK #-} !CommitmentNumber
+  , cc_local_payment_bp  :: !PaymentBasepoint
+    -- ^ the owner's @payment_basepoint@
+  , cc_remote_payment_bp :: !PaymentBasepoint
+    -- ^ the other party's @payment_basepoint@
+  , cc_to_self_delay     :: {-# UNPACK #-} !ToSelfDelay
+    -- ^ the delay on the owner's outputs (set by the other party)
+  , cc_dust_limit        :: {-# UNPACK #-} !DustLimit
+    -- ^ the owner's @dust_limit_satoshis@
+  , cc_feerate           :: {-# UNPACK #-} !FeeratePerKw
+  , cc_format            :: !CommitmentFormat
+  , cc_is_funder         :: !Bool
+    -- ^ whether the owner opened the channel, and so pays the fee
+  , cc_to_local_msat     :: {-# UNPACK #-} !MilliSatoshi
+  , cc_to_remote_msat    :: {-# UNPACK #-} !MilliSatoshi
+  , cc_htlcs             :: ![HTLC]
+  , cc_keys              :: !CommitmentKeys
   } deriving (Eq, Show, Generic)
 
--- | A commitment transaction.
+instance NFData CommitmentContext
+
+-- | An unsigned commitment transaction.
 data CommitmentTx = CommitmentTx
-  { ctx_version            :: {-# UNPACK #-} !Word32
-  , ctx_locktime           :: !Locktime
-  , ctx_input_outpoint     :: !OutPoint
-  , ctx_input_sequence     :: !Sequence
-  , ctx_outputs            :: ![TxOutput]
-  , ctx_funding_script     :: !Script
+  { ctx_version        :: {-# UNPACK #-} !Word32
+  , ctx_locktime       :: {-# UNPACK #-} !Locktime
+  , ctx_input_outpoint :: {-# UNPACK #-} !OutPoint
+  , ctx_input_sequence :: {-# UNPACK #-} !Sequence
+  , ctx_outputs        :: !(NonEmpty CommitmentOutput)
+    -- ^ in BIP69+CLTV order
+  , ctx_funding_script :: !Script
+    -- ^ the funding output's witness script, which signatures commit
+    --   to
   } deriving (Eq, Show, Generic)
 
--- | Build a commitment transaction.
+instance NFData CommitmentTx
+
+-- | Build a commitment transaction, per BOLT #3's "Commitment
+--   Transaction Construction":
 --
--- Follows the algorithm from BOLT #3:
+--   * the locktime and input sequence encode the obscured commitment
+--     number (the payment basepoints are ordered by 'cc_is_funder');
+--   * HTLCs whose amount, less the HTLC transaction fee, is below the
+--     dust limit are trimmed;
+--   * the base fee (and under 'Anchors', both anchors) are taken from
+--     the funder's output, which is left at zero if it can't cover
+--     them;
+--   * @to_local@ and @to_remote@ outputs below the dust limit are
+--     omitted, and under 'Anchors' each party's anchor is added if its
+--     output, or any HTLC output, exists;
+--   * outputs are sorted by value, scriptPubKey and CLTV expiry.
 --
--- 1. Initialize input and locktime with obscured commitment number
--- 2. Calculate which HTLCs are trimmed
--- 3. Calculate base fee and subtract from funder
--- 4. Add untrimmed HTLC outputs
--- 5. Add to_local output if above dust
--- 6. Add to_remote output if above dust
--- 7. Add anchor outputs if option_anchors
--- 8. Sort outputs per BIP69+CLTV
-build_commitment_tx :: CommitmentContext -> CommitmentTx
-build_commitment_tx ctx =
-  let !obscured = obscured_commitment_number
-        (cc_local_payment_bp ctx)
-        (cc_remote_payment_bp ctx)
-        (cc_commitment_number ctx)
+--   Fails if the transaction would have no outputs.
+build_commitment_tx :: CommitmentContext -> Maybe CommitmentTx
+build_commitment_tx ctx = do
+    outputs <- NE.nonEmpty . sort_outputs $
+      to_local <> to_remote <> local_anchor <> remote_anchor <> htlcs
+    pure CommitmentTx
+      { ctx_version        = 2
+      , ctx_locktime       =
+          Locktime (0x20000000 .|. (fromIntegral obscured .&. 0xFFFFFF))
+      , ctx_input_outpoint = cc_funding_outpoint ctx
+      , ctx_input_sequence =
+          Sequence
+            (0x80000000 .|. (fromIntegral (obscured `shiftR` 24) .&. 0xFFFFFF))
+      , ctx_outputs        = outputs
+      , ctx_funding_script =
+          funding_script (ck_local_funding keys) (ck_remote_funding keys)
+      }
+  where
+    !keys = cc_keys ctx
+    !fmt  = cc_format ctx
+    !rate = cc_feerate ctx
+    !dust = cc_dust_limit ctx
+    DustLimit dust_sat = dust
 
-      -- Locktime: upper 8 bits are 0x20, lower 24 bits are lower 24 of obscured
-      !locktime = Locktime $
-        (0x20 `shiftL` 24) .|. (fromIntegral obscured .&. 0x00FFFFFF)
+    (!opener, !accepter)
+      | cc_is_funder ctx = (cc_local_payment_bp ctx, cc_remote_payment_bp ctx)
+      | otherwise        = (cc_remote_payment_bp ctx, cc_local_payment_bp ctx)
+    !obscured =
+      obscured_commitment_number opener accepter (cc_commitment_number ctx)
 
-      -- Sequence: upper 8 bits are 0x80, lower 24 bits are upper 24 of obscured
-      !inputSeq = Sequence $
-        (0x80 `shiftL` 24) .|.
-        (fromIntegral (obscured `shiftR` 24) .&. 0x00FFFFFF)
+    untrimmed = filter (not . is_trimmed dust rate fmt) (cc_htlcs ctx)
 
-      -- Funding script for witness
-      !fundingScript = funding_script
-        (ck_local_funding $ cc_keys ctx)
-        (ck_remote_funding $ cc_keys ctx)
+    !fee = commitment_fee rate fmt (fromIntegral (length untrimmed))
+    !deduction = case fmt of
+      StaticRemotekey -> fee
+      Anchors         ->
+        fromMaybe BOLT1.max_satoshi (BOLT1.add_sat fee (sat 660))
+    deduct s = fromMaybe (sat 0) (BOLT1.sub_sat s deduction)
 
-      -- Calculate untrimmed HTLCs
-      !untrimmedHtlcs = untrimmed_htlcs
-        (cc_dust_limit ctx)
-        (cc_feerate ctx)
-        (cc_features ctx)
-        (cc_htlcs ctx)
+    !local_sat  = BOLT1.msat_to_sat (cc_to_local_msat ctx)
+    !remote_sat = BOLT1.msat_to_sat (cc_to_remote_msat ctx)
+    (!to_local_sat, !to_remote_sat)
+      | cc_is_funder ctx = (deduct local_sat, remote_sat)
+      | otherwise        = (local_sat, deduct remote_sat)
 
-      -- Calculate base fee
-      !baseFee = commitment_fee
-        (cc_feerate ctx)
-        (cc_features ctx)
-        (fromIntegral $ length untrimmedHtlcs)
+    to_local =
+      [ CommitmentOutput to_local_sat
+          (to_p2wsh (to_local_script (ck_revocation_pubkey keys)
+                       (cc_to_self_delay ctx) (ck_local_delayed keys)))
+          OutputToLocal
+      | to_local_sat >= dust_sat ]
 
-      -- Anchor cost if applicable
-      !anchorCost = if has_anchors (cc_features ctx)
-        then 2 * anchor_output_value
-        else Satoshi 0
+    to_remote =
+      [ CommitmentOutput to_remote_sat
+          (to_remote_script_pubkey (ck_remote_payment keys) fmt)
+          OutputToRemote
+      | to_remote_sat >= dust_sat ]
 
-      -- Subtract fees and anchors from funder
-      !totalDeduction = baseFee + anchorCost
-      !(toLocalSat, toRemoteSat) = if cc_is_funder ctx
-        then
-          let !local = msatToSat (cc_to_local_msat ctx)
-              !deducted = if unSatoshi local >= unSatoshi totalDeduction
-                          then Satoshi (unSatoshi local - unSatoshi totalDeduction)
-                          else Satoshi 0
-          in (deducted, msatToSat (cc_to_remote_msat ctx))
-        else
-          let !remote = msatToSat (cc_to_remote_msat ctx)
-              !deducted = if unSatoshi remote >= unSatoshi totalDeduction
-                          then Satoshi (unSatoshi remote - unSatoshi totalDeduction)
-                          else Satoshi 0
-          in (msatToSat (cc_to_local_msat ctx), deducted)
+    has_htlcs = not (null untrimmed)
+    anchor pk ty = CommitmentOutput anchor_output_value
+      (to_p2wsh (anchor_script pk)) ty
 
-      !dustLimit = unDustLimit (cc_dust_limit ctx)
+    local_anchor = case fmt of
+      Anchors | not (null to_local) || has_htlcs ->
+        [anchor (ck_local_funding keys) OutputLocalAnchor]
+      _ -> []
 
-      -- Build HTLC outputs
-      !htlcOutputs = map (htlcOutput ctx) untrimmedHtlcs
+    remote_anchor = case fmt of
+      Anchors | not (null to_remote) || has_htlcs ->
+        [anchor (ck_remote_funding keys) OutputRemoteAnchor]
+      _ -> []
 
-      -- Build to_local output if above dust
-      !toLocalOutput =
-        if unSatoshi toLocalSat >= unSatoshi dustLimit
-        then
-          let !script = to_p2wsh $ to_local_script
-                (ck_revocation_pubkey $ cc_keys ctx)
-                (cc_to_self_delay ctx)
-                (ck_local_delayed $ cc_keys ctx)
-          in [TxOutput toLocalSat script OutputToLocal]
-        else []
+    htlcs = fmap htlc_output untrimmed
 
-      -- Build to_remote output if above dust
-      !toRemoteOutput =
-        if unSatoshi toRemoteSat >= unSatoshi dustLimit
-        then
-          let !script = if has_anchors (cc_features ctx)
-                then to_p2wsh $ to_remote_script
-                       (ck_remote_payment $ cc_keys ctx)
-                       (cc_features ctx)
-                else to_remote_script
-                       (ck_remote_payment $ cc_keys ctx)
-                       (cc_features ctx)
-          in [TxOutput toRemoteSat script OutputToRemote]
-        else []
+    htlc_output h =
+      let !script = case htlc_direction h of
+            HTLCOffered  -> offered_htlc_script
+              (ck_revocation_pubkey keys) (ck_remote_htlc keys)
+              (ck_local_htlc keys) (htlc_payment_hash h) fmt
+            HTLCReceived -> received_htlc_script
+              (ck_revocation_pubkey keys) (ck_remote_htlc keys)
+              (ck_local_htlc keys) (htlc_payment_hash h)
+              (htlc_cltv_expiry h) fmt
+      in  CommitmentOutput (BOLT1.msat_to_sat (htlc_amount_msat h))
+            (to_p2wsh script) (OutputHTLC h)
 
-      -- Build anchor outputs if option_anchors
-      !hasUntrimmedHtlcs = not (null untrimmedHtlcs)
-      !toLocalExists = not (null toLocalOutput)
-      !toRemoteExists = not (null toRemoteOutput)
+-- BIP69+CLTV order: value, then scriptPubKey, then (for HTLCs) CLTV
+-- expiry.
+sort_outputs :: [CommitmentOutput] -> [CommitmentOutput]
+sort_outputs = sortBy cmp where
+  cmp a b = compare (co_value a) (co_value b)
+         <> compare (co_script a) (co_script b)
+         <> compare (cltv (co_type a)) (cltv (co_type b))
+  cltv t = case t of
+    OutputHTLC h -> Just (htlc_cltv_expiry h)
+    _            -> Nothing
 
-      !localAnchorOutput =
-        if has_anchors (cc_features ctx) &&
-           (toLocalExists || hasUntrimmedHtlcs)
-        then
-          let !script = to_p2wsh $ anchor_script
-                (ck_local_funding $ cc_keys ctx)
-          in [TxOutput anchor_output_value script OutputLocalAnchor]
-        else []
+-- HTLC transactions ----------------------------------------------------------
 
-      !remoteAnchorOutput =
-        if has_anchors (cc_features ctx) &&
-           (toRemoteExists || hasUntrimmedHtlcs)
-        then
-          let !script = to_p2wsh $ anchor_script
-                (ck_remote_funding $ cc_keys ctx)
-          in [TxOutput anchor_output_value script OutputRemoteAnchor]
-        else []
-
-      -- Combine and sort all outputs
-      !allOutputs = toLocalOutput ++ toRemoteOutput ++
-                    localAnchorOutput ++ remoteAnchorOutput ++
-                    htlcOutputs
-      !sortedOutputs = sort_outputs allOutputs
-
-  in CommitmentTx
-       { ctx_version = 2
-       , ctx_locktime = locktime
-       , ctx_input_outpoint = cc_funding_outpoint ctx
-       , ctx_input_sequence = inputSeq
-       , ctx_outputs = sortedOutputs
-       , ctx_funding_script = fundingScript
-       }
-{-# INLINE build_commitment_tx #-}
-
--- | Build an HTLC output for commitment transaction.
-htlcOutput :: CommitmentContext -> HTLC -> TxOutput
-htlcOutput ctx htlc =
-  let !amountSat = msatToSat (htlc_amount_msat htlc)
-      !keys = cc_keys ctx
-      !features = cc_features ctx
-      !expiry = htlc_cltv_expiry htlc
-  in case htlc_direction htlc of
-       HTLCOffered ->
-         let !script = to_p2wsh $ offered_htlc_script
-               (ck_revocation_pubkey keys)
-               (ck_remote_htlc keys)
-               (ck_local_htlc keys)
-               (htlc_payment_hash htlc)
-               features
-         in TxOutput amountSat script (OutputOfferedHTLC expiry)
-       HTLCReceived ->
-         let !script = to_p2wsh $ received_htlc_script
-               (ck_revocation_pubkey keys)
-               (ck_remote_htlc keys)
-               (ck_local_htlc keys)
-               (htlc_payment_hash htlc)
-               expiry
-               features
-         in TxOutput amountSat script (OutputReceivedHTLC expiry)
-{-# INLINE htlcOutput #-}
-
--- HTLC transactions -----------------------------------------------------------
-
--- | Context for building HTLC transactions.
+-- | The parameters of an HTLC-success or HTLC-timeout transaction,
+--   spending an HTLC output of the owner's commitment transaction.
 data HTLCContext = HTLCContext
-  { hc_commitment_txid     :: !TxId
-  , hc_output_index        :: {-# UNPACK #-} !Word32
-  , hc_htlc                :: !HTLC
-  , hc_to_self_delay       :: !ToSelfDelay
-  , hc_feerate             :: !FeeratePerKw
-  , hc_features            :: !ChannelFeatures
-  , hc_revocation_pubkey   :: !RevocationPubkey
-  , hc_local_delayed       :: !LocalDelayedPubkey
+  { hc_commitment_txid   :: !TxId
+  , hc_output_index      :: {-# UNPACK #-} !Word32
+  , hc_htlc              :: !HTLC
+  , hc_to_self_delay     :: {-# UNPACK #-} !ToSelfDelay
+  , hc_feerate           :: {-# UNPACK #-} !FeeratePerKw
+  , hc_format            :: !CommitmentFormat
+  , hc_revocation_pubkey :: !RevocationPubkey
+  , hc_local_delayed     :: !LocalDelayedPubkey
   } deriving (Eq, Show, Generic)
 
--- | An HTLC transaction (timeout or success).
+instance NFData HTLCContext
+
+-- | An unsigned HTLC-success or HTLC-timeout transaction.
 data HTLCTx = HTLCTx
-  { htx_version            :: {-# UNPACK #-} !Word32
-  , htx_locktime           :: !Locktime
-  , htx_input_outpoint     :: !OutPoint
-  , htx_input_sequence     :: !Sequence
-  , htx_output_value       :: !Satoshi
-  , htx_output_script      :: !Script
+  { htx_version        :: {-# UNPACK #-} !Word32
+  , htx_locktime       :: {-# UNPACK #-} !Locktime
+  , htx_input_outpoint :: {-# UNPACK #-} !OutPoint
+  , htx_input_sequence :: {-# UNPACK #-} !Sequence
+  , htx_output_value   :: {-# UNPACK #-} !Satoshi
+  , htx_output_script  :: !Script
   } deriving (Eq, Show, Generic)
 
--- | Internal helper for HTLC transaction construction.
+instance NFData HTLCTx
+
+-- | Build the second-stage transaction for an HTLC output of the
+--   owner's commitment transaction: HTLC-timeout (locktime
+--   @cltv_expiry@) for an offered HTLC, and HTLC-success (locktime 0)
+--   for a received one.
 --
--- Both HTLC-timeout and HTLC-success transactions share the same
--- structure, differing only in locktime and fee calculation.
-build_htlc_tx_common
-  :: HTLCContext
-  -> Locktime           -- ^ Transaction locktime
-  -> Satoshi            -- ^ Fee to subtract from output
-  -> HTLCTx
-build_htlc_tx_common ctx locktime fee =
-  let !amountSat = msatToSat (htlc_amount_msat $ hc_htlc ctx)
-      !outputValue = if unSatoshi amountSat >= unSatoshi fee
-                     then Satoshi (unSatoshi amountSat - unSatoshi fee)
-                     else Satoshi 0
-      !inputSeq = if has_anchors (hc_features ctx)
-                   then Sequence 1
-                   else Sequence 0
-      !outpoint = OutPoint (hc_commitment_txid ctx) (hc_output_index ctx)
-      !outputScript = to_p2wsh $ htlc_output_script
-        (hc_revocation_pubkey ctx)
-        (hc_to_self_delay ctx)
-        (hc_local_delayed ctx)
-  in HTLCTx
-       { htx_version = 2
-       , htx_locktime = locktime
-       , htx_input_outpoint = outpoint
-       , htx_input_sequence = inputSeq
-       , htx_output_value = outputValue
-       , htx_output_script = outputScript
-       }
-{-# INLINE build_htlc_tx_common #-}
+--   The output pays the HTLC amount, less the HTLC transaction fee
+--   (zero under 'Anchors'), to the 'to_local_script' of the owner's
+--   keys. Fails if the fee exceeds the amount (such an HTLC is always
+--   trimmed).
+build_htlc_tx :: HTLCContext -> Maybe HTLCTx
+build_htlc_tx ctx = do
+    value <- BOLT1.sub_sat (BOLT1.msat_to_sat (htlc_amount_msat h)) fee
+    pure HTLCTx
+      { htx_version        = 2
+      , htx_locktime       = locktime
+      , htx_input_outpoint =
+          OutPoint (hc_commitment_txid ctx) (hc_output_index ctx)
+      , htx_input_sequence = case fmt of
+          StaticRemotekey -> Sequence 0
+          Anchors         -> Sequence 1
+      , htx_output_value   = value
+      , htx_output_script  = to_p2wsh $ to_local_script
+          (hc_revocation_pubkey ctx) (hc_to_self_delay ctx)
+          (hc_local_delayed ctx)
+      }
+  where
+    !h = hc_htlc ctx
+    !fmt = hc_format ctx
+    (!fee, !locktime) = case htlc_direction h of
+      HTLCOffered  ->
+        let CltvExpiry e = htlc_cltv_expiry h
+        in  (htlc_timeout_fee (hc_feerate ctx) fmt, Locktime e)
+      HTLCReceived ->
+        (htlc_success_fee (hc_feerate ctx) fmt, Locktime 0)
 
--- | Build an HTLC-timeout transaction.
---
--- * locktime: cltv_expiry
--- * sequence: 0 (or 1 with option_anchors)
--- * output: to_local style script with revocation and delayed paths
-build_htlc_timeout_tx :: HTLCContext -> HTLCTx
-build_htlc_timeout_tx ctx =
-  let !fee = htlc_timeout_fee (hc_feerate ctx) (hc_features ctx)
-      !locktime = Locktime (unCltvExpiry $ htlc_cltv_expiry $ hc_htlc ctx)
-  in build_htlc_tx_common ctx locktime fee
-{-# INLINE build_htlc_timeout_tx #-}
+-- closing transactions -------------------------------------------------------
 
--- | Build an HTLC-success transaction.
---
--- * locktime: 0
--- * sequence: 0 (or 1 with option_anchors)
--- * output: to_local style script with revocation and delayed paths
-build_htlc_success_tx :: HTLCContext -> HTLCTx
-build_htlc_success_tx ctx =
-  let !fee = htlc_success_fee (hc_feerate ctx) (hc_features ctx)
-  in build_htlc_tx_common ctx (Locktime 0) fee
-{-# INLINE build_htlc_success_tx #-}
-
--- closing transaction ---------------------------------------------------------
-
--- | Context for building closing transactions.
-data ClosingContext = ClosingContext
-  { clc_funding_outpoint   :: !OutPoint
-  , clc_local_amount       :: !Satoshi
-  , clc_remote_amount      :: !Satoshi
-  , clc_local_script       :: !Script
-  , clc_remote_script      :: !Script
-  , clc_local_dust_limit   :: !DustLimit
-  , clc_remote_dust_limit  :: !DustLimit
-  , clc_fee                :: !Satoshi
-  , clc_is_funder          :: !Bool
-  , clc_locktime           :: !Locktime
-  , clc_funding_script     :: !Script
+-- | A closing transaction output.
+data ClosingOutput = ClosingOutput
+  { clo_value  :: {-# UNPACK #-} !Satoshi
+  , clo_script :: !Script     -- ^ scriptPubKey
   } deriving (Eq, Show, Generic)
 
--- | A closing transaction.
+instance NFData ClosingOutput
+
+-- | An unsigned closing transaction.
 data ClosingTx = ClosingTx
-  { cltx_version           :: {-# UNPACK #-} !Word32
-  , cltx_locktime          :: !Locktime
-  , cltx_input_outpoint    :: !OutPoint
-  , cltx_input_sequence    :: !Sequence
-  , cltx_outputs           :: ![TxOutput]
-  , cltx_funding_script    :: !Script
+  { cltx_version        :: {-# UNPACK #-} !Word32
+  , cltx_locktime       :: {-# UNPACK #-} !Locktime
+  , cltx_input_outpoint :: {-# UNPACK #-} !OutPoint
+  , cltx_input_sequence :: {-# UNPACK #-} !Sequence
+  , cltx_outputs        :: !(NonEmpty ClosingOutput)
+    -- ^ in BIP69 order
   } deriving (Eq, Show, Generic)
 
--- | Build a closing transaction (option_simple_close).
+instance NFData ClosingTx
+
+-- | Which outputs an @option_simple_close@ closing transaction has,
+--   matching the signature fields of @closing_complete@.
+data ClosingOutputs
+  = CloserOutputOnly
+  | CloseeOutputOnly
+  | CloserAndCloseeOutputs
+  deriving (Eq, Show, Generic)
+
+instance NFData ClosingOutputs
+
+-- | The parameters of an @option_simple_close@ closing transaction,
+--   as given by a @closing_complete@ message.
+data ClosingContext = ClosingContext
+  { clc_funding_outpoint :: {-# UNPACK #-} !OutPoint
+  , clc_closer_msat      :: {-# UNPACK #-} !MilliSatoshi
+    -- ^ the closer's final balance
+  , clc_closee_msat      :: {-# UNPACK #-} !MilliSatoshi
+    -- ^ the closee's final balance
+  , clc_closer_script    :: !Script
+  , clc_closee_script    :: !Script
+  , clc_fee              :: {-# UNPACK #-} !Satoshi
+  , clc_locktime         :: {-# UNPACK #-} !Locktime
+  , clc_outputs          :: !ClosingOutputs
+  } deriving (Eq, Show, Generic)
+
+instance NFData ClosingContext
+
+-- | Build an @option_simple_close@ closing transaction (BOLT #3's
+--   "Closing Transaction"), for @closing_complete@ and @closing_sig@.
 --
--- * locktime: from closing_complete message
--- * sequence: 0xFFFFFFFD
--- * outputs: sorted per BIP69
-build_closing_tx :: ClosingContext -> ClosingTx
-build_closing_tx ctx =
-  let -- Subtract fee from closer
-      !(localAmt, remoteAmt) = if clc_is_funder ctx
-        then
-          let !deducted = if unSatoshi (clc_local_amount ctx) >=
-                             unSatoshi (clc_fee ctx)
-                          then Satoshi (unSatoshi (clc_local_amount ctx) -
-                                        unSatoshi (clc_fee ctx))
-                          else Satoshi 0
-          in (deducted, clc_remote_amount ctx)
-        else
-          let !deducted = if unSatoshi (clc_remote_amount ctx) >=
-                             unSatoshi (clc_fee ctx)
-                          then Satoshi (unSatoshi (clc_remote_amount ctx) -
-                                        unSatoshi (clc_fee ctx))
-                          else Satoshi 0
-          in (clc_local_amount ctx, deducted)
+--   The closer pays the fee: its output is its balance, rounded down
+--   to whole satoshis, less the fee. An output whose scriptPubKey
+--   starts with @OP_RETURN@ has amount 0. Only the chosen outputs are
+--   included, and none is trimmed. Fails if the fee exceeds the
+--   closer's balance.
+build_closing_tx :: ClosingContext -> Maybe ClosingTx
+build_closing_tx ctx = do
+    closer_sat <-
+      BOLT1.sub_sat (BOLT1.msat_to_sat (clc_closer_msat ctx)) (clc_fee ctx)
+    let !closer = output closer_sat (clc_closer_script ctx)
+        !closee = output (BOLT1.msat_to_sat (clc_closee_msat ctx))
+                    (clc_closee_script ctx)
+    pure ClosingTx
+      { cltx_version        = 2
+      , cltx_locktime       = clc_locktime ctx
+      , cltx_input_outpoint = clc_funding_outpoint ctx
+      , cltx_input_sequence = Sequence 0xFFFFFFFD
+      , cltx_outputs        = case clc_outputs ctx of
+          CloserOutputOnly       -> closer :| []
+          CloseeOutputOnly       -> closee :| []
+          CloserAndCloseeOutputs -> sort_closing (closer :| [closee])
+      }
+  where
+    output amt spk@(Script s) = case BS.uncons s of
+      Just (0x6a, _) -> ClosingOutput (sat 0) spk
+      _              -> ClosingOutput amt spk
 
-      -- Build outputs, omitting dust
-      !localOutput =
-        if unSatoshi localAmt >= unSatoshi (unDustLimit $ clc_local_dust_limit ctx)
-        then [TxOutput localAmt (clc_local_script ctx) OutputToLocal]
-        else []
+-- | The parameters of a legacy closing transaction (for
+--   @closing_signed@), from the point of view of the node producing
+--   the signature (the "local" party).
+data LegacyClosingContext = LegacyClosingContext
+  { lcc_funding_outpoint :: {-# UNPACK #-} !OutPoint
+  , lcc_local_msat       :: {-# UNPACK #-} !MilliSatoshi
+  , lcc_remote_msat      :: {-# UNPACK #-} !MilliSatoshi
+  , lcc_local_script     :: !Script
+  , lcc_remote_script    :: !Script
+  , lcc_dust_limit       :: {-# UNPACK #-} !DustLimit
+    -- ^ the signer's @dust_limit_satoshis@
+  , lcc_fee              :: {-# UNPACK #-} !Satoshi
+  , lcc_is_funder        :: !Bool
+    -- ^ whether the signer funded the channel, and so pays the fee
+  , lcc_omit_local       :: !Bool
+    -- ^ whether the signer eliminates its own output
+  } deriving (Eq, Show, Generic)
 
-      !remoteOutput =
-        if unSatoshi remoteAmt >= unSatoshi (unDustLimit $ clc_remote_dust_limit ctx)
-        then [TxOutput remoteAmt (clc_remote_script ctx) OutputToRemote]
-        else []
+instance NFData LegacyClosingContext
 
-      !allOutputs = localOutput ++ remoteOutput
-      !sortedOutputs = sort_outputs allOutputs
-
-  in ClosingTx
-       { cltx_version = 2
-       , cltx_locktime = clc_locktime ctx
-       , cltx_input_outpoint = clc_funding_outpoint ctx
-       , cltx_input_sequence = Sequence 0xFFFFFFFD
-       , cltx_outputs = sortedOutputs
-       , cltx_funding_script = clc_funding_script ctx
-       }
-{-# INLINE build_closing_tx #-}
-
--- | Build a legacy closing transaction (closing_signed).
+-- | Build a legacy closing transaction (BOLT #3's "Legacy Closing
+--   Transaction"), for @closing_signed@.
 --
--- * locktime: 0
--- * sequence: 0xFFFFFFFF
--- * outputs: sorted per BIP69
-build_legacy_closing_tx :: ClosingContext -> ClosingTx
-build_legacy_closing_tx ctx =
-  let !result = build_closing_tx ctx
-        { clc_locktime = Locktime 0 }
-  in result { cltx_input_sequence = Sequence 0xFFFFFFFF }
-{-# INLINE build_legacy_closing_tx #-}
+--   Balances are rounded down to whole satoshis and the fee is taken
+--   from the funder's output. Outputs below the signer's dust limit
+--   are removed, as is the signer's own output if 'lcc_omit_local' is
+--   set. Fails if the fee exceeds the funder's balance, or if no
+--   output remains.
+build_legacy_closing_tx :: LegacyClosingContext -> Maybe ClosingTx
+build_legacy_closing_tx ctx = do
+    let !local_sat  = BOLT1.msat_to_sat (lcc_local_msat ctx)
+        !remote_sat = BOLT1.msat_to_sat (lcc_remote_msat ctx)
+        DustLimit dust = lcc_dust_limit ctx
+    (l, r) <-
+      if   lcc_is_funder ctx
+      then fmap (\x -> (x, remote_sat)) (BOLT1.sub_sat local_sat fee)
+      else fmap (\x -> (local_sat, x)) (BOLT1.sub_sat remote_sat fee)
+    outputs <- NE.nonEmpty $
+         [ ClosingOutput l (lcc_local_script ctx)
+         | not (lcc_omit_local ctx), l >= dust ]
+      <> [ ClosingOutput r (lcc_remote_script ctx) | r >= dust ]
+    pure ClosingTx
+      { cltx_version        = 2
+      , cltx_locktime       = Locktime 0
+      , cltx_input_outpoint = lcc_funding_outpoint ctx
+      , cltx_input_sequence = Sequence 0xFFFFFFFF
+      , cltx_outputs        = sort_closing outputs
+      }
+  where
+    !fee = lcc_fee ctx
 
--- fee calculation -------------------------------------------------------------
+-- BIP69 order: value, then scriptPubKey.
+sort_closing :: NonEmpty ClosingOutput -> NonEmpty ClosingOutput
+sort_closing = NE.sortBy $ \a b ->
+  compare (clo_value a) (clo_value b) <> compare (clo_script a) (clo_script b)
 
--- | Calculate the base commitment transaction fee.
+-- fees -----------------------------------------------------------------------
+
+-- feerate * weight / 1000, saturating at 21 million BTC.
+weight_fee :: FeeratePerKw -> Integer -> Satoshi
+weight_fee (FeeratePerKw rate) weight =
+  let !f = toInteger rate * weight `quot` 1000
+  in  if   f > toInteger (BOLT1.un_satoshi BOLT1.max_satoshi)
+      then BOLT1.max_satoshi
+      else sat (fromInteger f)
+
+-- | The base fee of a commitment transaction with a given number of
+--   untrimmed HTLC outputs:
 --
--- @fee = feerate_per_kw * weight / 1000@
+--   @feerate_per_kw * (724 + 172 * num_htlcs) / 1000@
 --
--- where @weight = base_weight + 172 * num_htlcs@
-commitment_fee :: FeeratePerKw -> ChannelFeatures -> Word64 -> Satoshi
-commitment_fee feerate features numHtlcs =
-  let !weight = commitment_weight features numHtlcs
-      !fee = (fromIntegral (unFeeratePerKw feerate) * weight) `div` 1000
-  in Satoshi fee
-{-# INLINE commitment_fee #-}
-
--- | Calculate commitment transaction weight.
+--   with a base weight of 1124 rather than 724 under 'Anchors'.
 --
--- @weight = base + 172 * num_htlcs@
-commitment_weight :: ChannelFeatures -> Word64 -> Word64
-commitment_weight features numHtlcs =
-  let !base = if has_anchors features
-              then commitment_weight_anchors
-              else commitment_weight_no_anchors
-  in base + htlc_output_weight * numHtlcs
-{-# INLINE commitment_weight #-}
+--   >>> commitment_fee (FeeratePerKw 5000) StaticRemotekey 2
+--   Satoshi 5340
+commitment_fee :: FeeratePerKw -> CommitmentFormat -> Word64 -> Satoshi
+commitment_fee rate fmt n = weight_fee rate (base + 172 * toInteger n) where
+  base = case fmt of
+    StaticRemotekey -> 724
+    Anchors         -> 1124
 
--- | Calculate HTLC-timeout transaction fee.
+-- | The fee of an HTLC-timeout transaction: @feerate_per_kw * 663 /
+--   1000@, or zero under 'Anchors'.
 --
--- With option_anchors, fee is 0 (CPFP).
--- Otherwise, @fee = feerate_per_kw * 663 / 1000@
-htlc_timeout_fee :: FeeratePerKw -> ChannelFeatures -> Satoshi
-htlc_timeout_fee feerate features
-  | has_anchors features = Satoshi 0
-  | otherwise =
-      let !weight = htlc_timeout_weight_no_anchors
-          !fee = (fromIntegral (unFeeratePerKw feerate) * weight) `div` 1000
-      in Satoshi fee
-{-# INLINE htlc_timeout_fee #-}
+--   >>> htlc_timeout_fee (FeeratePerKw 5000) StaticRemotekey
+--   Satoshi 3315
+htlc_timeout_fee :: FeeratePerKw -> CommitmentFormat -> Satoshi
+htlc_timeout_fee rate fmt = case fmt of
+  StaticRemotekey -> weight_fee rate 663
+  Anchors         -> sat 0
 
--- | Calculate HTLC-success transaction fee.
+-- | The fee of an HTLC-success transaction: @feerate_per_kw * 703 /
+--   1000@, or zero under 'Anchors'.
 --
--- With option_anchors, fee is 0 (CPFP).
--- Otherwise, @fee = feerate_per_kw * 703 / 1000@
-htlc_success_fee :: FeeratePerKw -> ChannelFeatures -> Satoshi
-htlc_success_fee feerate features
-  | has_anchors features = Satoshi 0
-  | otherwise =
-      let !weight = htlc_success_weight_no_anchors
-          !fee = (fromIntegral (unFeeratePerKw feerate) * weight) `div` 1000
-      in Satoshi fee
-{-# INLINE htlc_success_fee #-}
+--   >>> htlc_success_fee (FeeratePerKw 5000) StaticRemotekey
+--   Satoshi 3515
+htlc_success_fee :: FeeratePerKw -> CommitmentFormat -> Satoshi
+htlc_success_fee rate fmt = case fmt of
+  StaticRemotekey -> weight_fee rate 703
+  Anchors         -> sat 0
 
--- trimming --------------------------------------------------------------------
+-- trimming -------------------------------------------------------------------
 
--- | Calculate the trim threshold for an HTLC.
+-- | The amount below which an HTLC in a given direction is trimmed:
+--   the dust limit plus the fee of its HTLC transaction.
 --
--- An HTLC is trimmed if:
--- @amount < dust_limit + htlc_tx_fee@
+--   >>> let Just d = fmap DustLimit (BOLT1.satoshi 546)
+--   >>> htlc_trim_threshold d (FeeratePerKw 5000) StaticRemotekey HTLCOffered
+--   Satoshi 3861
 htlc_trim_threshold
   :: DustLimit
   -> FeeratePerKw
-  -> ChannelFeatures
+  -> CommitmentFormat
   -> HTLCDirection
   -> Satoshi
-htlc_trim_threshold dust feerate features direction =
-  let !dustVal = unDustLimit dust
-      !htlcFee = case direction of
-        HTLCOffered  -> htlc_timeout_fee feerate features
-        HTLCReceived -> htlc_success_fee feerate features
-  in Satoshi (unSatoshi dustVal + unSatoshi htlcFee)
-{-# INLINE htlc_trim_threshold #-}
+htlc_trim_threshold (DustLimit dust) rate fmt dir =
+  let !fee = case dir of
+        HTLCOffered  -> htlc_timeout_fee rate fmt
+        HTLCReceived -> htlc_success_fee rate fmt
+  in  fromMaybe BOLT1.max_satoshi (BOLT1.add_sat dust fee)
 
--- | Check if an HTLC should be trimmed.
---
--- An HTLC is trimmed if its amount minus the HTLC tx fee is below
--- the dust limit.
-is_trimmed :: DustLimit -> FeeratePerKw -> ChannelFeatures -> HTLC -> Bool
-is_trimmed dust feerate features htlc =
-  let !threshold = htlc_trim_threshold dust feerate features
-                     (htlc_direction htlc)
-      !amountSat = msatToSat (htlc_amount_msat htlc)
-  in unSatoshi amountSat < unSatoshi threshold
-{-# INLINE is_trimmed #-}
+-- | Whether an HTLC is trimmed from a commitment transaction: whether
+--   its amount, rounded down to whole satoshis, is below
+--   'htlc_trim_threshold'.
+is_trimmed :: DustLimit -> FeeratePerKw -> CommitmentFormat -> HTLC -> Bool
+is_trimmed dust rate fmt h =
+  BOLT1.msat_to_sat (htlc_amount_msat h)
+    < htlc_trim_threshold dust rate fmt (htlc_direction h)
 
--- | Filter HTLCs that are trimmed.
-trimmed_htlcs
-  :: DustLimit
-  -> FeeratePerKw
-  -> ChannelFeatures
-  -> [HTLC]
-  -> [HTLC]
-trimmed_htlcs dust feerate features =
-  filter (is_trimmed dust feerate features)
-{-# INLINE trimmed_htlcs #-}
+-- serialization --------------------------------------------------------------
 
--- | Filter HTLCs that are not trimmed.
-untrimmed_htlcs
-  :: DustLimit
-  -> FeeratePerKw
-  -> ChannelFeatures
-  -> [HTLC]
-  -> [HTLC]
-untrimmed_htlcs dust feerate features =
-  filter (not . is_trimmed dust feerate features)
-{-# INLINE untrimmed_htlcs #-}
-
--- conversion to ppad-tx -------------------------------------------------------
-
--- | Convert a 'TxOutput' to a ppad-tx 'BT.TxOut'.
-toTxOut :: TxOutput -> BT.TxOut
-toTxOut o = BT.TxOut
-  { BT.txout_value =
-      unSatoshi (txout_value o)
-  , BT.txout_script_pubkey =
-      unScript (txout_script o)
+unsigned_tx
+  :: Word32 -> Locktime -> OutPoint -> Sequence -> NonEmpty BT.TxOut
+  -> BT.Tx
+unsigned_tx version (Locktime lt) prevout (Sequence sq) outs = BT.Tx
+  { BT.tx_version   = version
+  , BT.tx_inputs    = BT.TxIn prevout BS.empty sq :| []
+  , BT.tx_outputs   = outs
+  , BT.tx_witnesses = []
+  , BT.tx_locktime  = lt
   }
-{-# INLINE toTxOut #-}
 
--- | Convert a commitment transaction to a ppad-tx 'BT.Tx'.
---
--- Returns 'Nothing' if the transaction has no outputs.
-commitment_to_tx :: CommitmentTx -> Maybe BT.Tx
-commitment_to_tx ctx = do
-  outs <- nonEmpty (map toTxOut (ctx_outputs ctx))
-  let !input = BT.TxIn
-        { BT.txin_prevout = ctx_input_outpoint ctx
-        , BT.txin_script_sig = BS.empty
-        , BT.txin_sequence =
-            unSequence (ctx_input_sequence ctx)
-        }
-  pure $! BT.Tx
-    { BT.tx_version = ctx_version ctx
-    , BT.tx_inputs = input :| []
-    , BT.tx_outputs = outs
-    , BT.tx_witnesses = []
-    , BT.tx_locktime = unLocktime (ctx_locktime ctx)
-    }
+txout :: Satoshi -> Script -> BT.TxOut
+txout v (Script s) = BT.TxOut (BOLT1.un_satoshi v) s
+{-# INLINE txout #-}
 
--- | Convert an HTLC transaction to a ppad-tx 'BT.Tx'.
+-- | The unsigned commitment transaction as a ppad-tx 'BT.Tx' (with no
+--   witnesses), e.g. for computing its txid or sighashes.
+commitment_to_tx :: CommitmentTx -> BT.Tx
+commitment_to_tx c = unsigned_tx (ctx_version c) (ctx_locktime c)
+  (ctx_input_outpoint c) (ctx_input_sequence c)
+  (fmap (\o -> txout (co_value o) (co_script o)) (ctx_outputs c))
+
+-- | The unsigned HTLC transaction as a ppad-tx 'BT.Tx'.
 htlc_to_tx :: HTLCTx -> BT.Tx
-htlc_to_tx htx =
-  let !input = BT.TxIn
-        { BT.txin_prevout = htx_input_outpoint htx
-        , BT.txin_script_sig = BS.empty
-        , BT.txin_sequence =
-            unSequence (htx_input_sequence htx)
-        }
-      !output = BT.TxOut
-        { BT.txout_value =
-            unSatoshi (htx_output_value htx)
-        , BT.txout_script_pubkey =
-            unScript (htx_output_script htx)
-        }
-  in BT.Tx
-    { BT.tx_version = htx_version htx
-    , BT.tx_inputs = input :| []
-    , BT.tx_outputs = output :| []
-    , BT.tx_witnesses = []
-    , BT.tx_locktime = unLocktime (htx_locktime htx)
-    }
+htlc_to_tx h = unsigned_tx (htx_version h) (htx_locktime h)
+  (htx_input_outpoint h) (htx_input_sequence h)
+  (txout (htx_output_value h) (htx_output_script h) :| [])
 
--- | Convert a closing transaction to a ppad-tx 'BT.Tx'.
---
--- Returns 'Nothing' if the transaction has no outputs.
-closing_to_tx :: ClosingTx -> Maybe BT.Tx
-closing_to_tx ctx = do
-  outs <- nonEmpty (map toTxOut (cltx_outputs ctx))
-  let !input = BT.TxIn
-        { BT.txin_prevout = cltx_input_outpoint ctx
-        , BT.txin_script_sig = BS.empty
-        , BT.txin_sequence =
-            unSequence (cltx_input_sequence ctx)
-        }
-  pure $! BT.Tx
-    { BT.tx_version = cltx_version ctx
-    , BT.tx_inputs = input :| []
-    , BT.tx_outputs = outs
-    , BT.tx_witnesses = []
-    , BT.tx_locktime = unLocktime (cltx_locktime ctx)
-    }
+-- | The unsigned closing transaction as a ppad-tx 'BT.Tx'.
+closing_to_tx :: ClosingTx -> BT.Tx
+closing_to_tx c = unsigned_tx (cltx_version c) (cltx_locktime c)
+  (cltx_input_outpoint c) (cltx_input_sequence c)
+  (fmap (\o -> txout (clo_value o) (clo_script o)) (cltx_outputs c))
 
--- output ordering -------------------------------------------------------------
+-- | Serialize an unsigned commitment transaction, without witness
+--   data. This is the form whose double-SHA256 is the txid; it is not
+--   what segwit signatures commit to (see ppad-tx's
+--   @Bitcoin.Prim.Tx.Sighash@). To broadcast, attach the witness to
+--   'commitment_to_tx' and serialize with ppad-tx.
+encode_commitment_tx :: CommitmentTx -> BS.ByteString
+encode_commitment_tx = BT.to_bytes_legacy . commitment_to_tx
 
--- | Sort outputs per BOLT #3 ordering.
---
--- Outputs are sorted by:
--- 1. Value (smallest first)
--- 2. ScriptPubKey (lexicographic)
--- 3. CLTV expiry (for HTLCs)
-sort_outputs :: [TxOutput] -> [TxOutput]
-sort_outputs = sortBy compareOutputs
-{-# INLINE sort_outputs #-}
+-- | Serialize an unsigned HTLC transaction, without witness data (cf.
+--   'encode_commitment_tx').
+encode_htlc_tx :: HTLCTx -> BS.ByteString
+encode_htlc_tx = BT.to_bytes_legacy . htlc_to_tx
 
--- | Compare two outputs for ordering.
-compareOutputs :: TxOutput -> TxOutput -> Ordering
-compareOutputs o1 o2 =
-  case compare (txout_value o1) (txout_value o2) of
-    EQ -> case compare (unScript $ txout_script o1)
-                       (unScript $ txout_script o2) of
-            EQ -> compareCltvExpiry (txout_type o1) (txout_type o2)
-            other -> other
-    other -> other
-{-# INLINE compareOutputs #-}
-
--- | Compare CLTV expiry for HTLC outputs.
-compareCltvExpiry :: OutputType -> OutputType -> Ordering
-compareCltvExpiry (OutputOfferedHTLC e1)  (OutputOfferedHTLC e2)  = compare e1 e2
-compareCltvExpiry (OutputReceivedHTLC e1) (OutputReceivedHTLC e2) = compare e1 e2
-compareCltvExpiry (OutputOfferedHTLC e1)  (OutputReceivedHTLC e2) = compare e1 e2
-compareCltvExpiry (OutputReceivedHTLC e1) (OutputOfferedHTLC e2)  = compare e1 e2
-compareCltvExpiry _ _ = EQ
-{-# INLINE compareCltvExpiry #-}
+-- | Serialize an unsigned closing transaction, without witness data
+--   (cf. 'encode_commitment_tx').
+encode_closing_tx :: ClosingTx -> BS.ByteString
+encode_closing_tx = BT.to_bytes_legacy . closing_to_tx
