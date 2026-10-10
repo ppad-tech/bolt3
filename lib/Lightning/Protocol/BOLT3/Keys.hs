@@ -43,17 +43,16 @@ module Lightning.Protocol.BOLT3.Keys (
 import Control.DeepSeq (NFData(..))
 import qualified Crypto.Curve.Secp256k1 as S
 import qualified Crypto.Hash.SHA256 as SHA256
+import qualified Data.Choice as C
 import Data.Bits ((.&.), (.|.), complement, complementBit, shiftL, shiftR,
                   testBit, xor)
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Builder as BSB
-import qualified Data.ByteString.Lazy as BSL
-import qualified Data.ByteString.Unsafe as BU
 import Data.Word (Word64)
 import GHC.Generics (Generic)
 import Lightning.Protocol.BOLT1 (Point, PerCommitmentSecret)
 import qualified Lightning.Protocol.BOLT1 as BOLT1
 import Lightning.Protocol.BOLT3.Types
+import qualified Numeric.Montgomery.Secp256k1.Scalar as SC
 
 -- points ---------------------------------------------------------------------
 
@@ -277,8 +276,7 @@ derive_privkey (Seckey sk_bs) (PerCommitmentPoint pcp) = do
   sk <- S.parse_int256 sk_bs
   bp <- to_point =<< S.derive_pub sk
   let !h = SHA256.hash (BOLT1.un_point pcp <> BOLT1.un_point bp)
-      !r = add_mod_n (w4 sk_bs) (reduce_n (w4 h))
-  to_seckey r
+  to_seckey (SC.to sk + SC.to (S.unsafe_roll32 h))
 
 -- | Derive a commitment's @revocationprivkey@ from the revocation
 --   basepoint secret and the commitment's (revealed) per-commitment
@@ -315,119 +313,16 @@ derive_revocationprivkey (Seckey rbs_bs) pcs = do
   pcp <- to_point =<< S.derive_pub ps
   let !rbp_bs = BOLT1.un_point rbp
       !pcp_bs = BOLT1.un_point pcp
-      !h1 = reduce_n (w4 (SHA256.hash (rbp_bs <> pcp_bs)))
-      !h2 = reduce_n (w4 (SHA256.hash (pcp_bs <> rbp_bs)))
-      !r  = add_mod_n (mul_mod_n (w4 rbs_bs) h1) (mul_mod_n (w4 pcs_bs) h2)
-  to_seckey r
+      !h1 = SC.to (S.unsafe_roll32 (SHA256.hash (rbp_bs <> pcp_bs)))
+      !h2 = SC.to (S.unsafe_roll32 (SHA256.hash (pcp_bs <> rbp_bs)))
+  to_seckey (SC.to rbs * h1 + SC.to ps * h2)
 
--- constant-time arithmetic modulo the secp256k1 group order ------------------
-
--- A 256-bit integer as four 64-bit limbs, least significant first.
-data W4 = W4
-  {-# UNPACK #-} !Word64
-  {-# UNPACK #-} !Word64
-  {-# UNPACK #-} !Word64
-  {-# UNPACK #-} !Word64
-
--- The secp256k1 group order n.
-_N :: W4
-_N = W4 0xBFD25E8CD0364141 0xBAAEDCE6AF48A03B
-        0xFFFFFFFFFFFFFFFE 0xFFFFFFFFFFFFFFFF
-
--- Read 32 big-endian bytes (the length is checked by the caller).
-w4 :: BS.ByteString -> W4
-w4 bs = W4 (limb 24) (limb 16) (limb 8) (limb 0) where
-  limb :: Int -> Word64
-  limb o = go 0 0 where
-    go !acc !i
-      | i == 8    = acc
-      | otherwise =
-          go ((acc `shiftL` 8) .|. fromIntegral (BU.unsafeIndex bs (o + i)))
-             (i + 1)
-
--- Write 32 big-endian bytes.
-unw4 :: W4 -> BS.ByteString
-unw4 (W4 a b c d) = BSL.toStrict . BSB.toLazyByteString $
-  BSB.word64BE d <> BSB.word64BE c <> BSB.word64BE b <> BSB.word64BE a
-
--- A valid secret key from a result in [0, n), failing on zero.
-to_seckey :: W4 -> Maybe Seckey
-to_seckey r@(W4 a b c d)
-  | (a .|. b .|. c .|. d) == 0 = Nothing
-  | otherwise                  = Just (Seckey (unw4 r))
-
--- a + b + c, for a carry c in {0, 1}; returns the sum and carry out.
-adc :: Word64 -> Word64 -> Word64 -> (Word64, Word64)
-adc a b c =
-  let !s = a + b + c
-      !o = ((a .&. b) .|. ((a .|. b) .&. complement s)) `shiftR` 63
-  in  (s, o)
-{-# INLINE adc #-}
-
--- a - b - c, for a borrow c in {0, 1}; returns the difference and
--- borrow out.
-sbb :: Word64 -> Word64 -> Word64 -> (Word64, Word64)
-sbb a b c =
-  let !s = a - b - c
-      !o = ((complement a .&. b) .|. (complement (a `xor` b) .&. s))
-             `shiftR` 63
-  in  (s, o)
-{-# INLINE sbb #-}
-
-add4 :: W4 -> W4 -> (W4, Word64)
-add4 (W4 a0 a1 a2 a3) (W4 b0 b1 b2 b3) =
-  let !(s0, c0) = adc a0 b0 0
-      !(s1, c1) = adc a1 b1 c0
-      !(s2, c2) = adc a2 b2 c1
-      !(s3, c3) = adc a3 b3 c2
-  in  (W4 s0 s1 s2 s3, c3)
-{-# INLINE add4 #-}
-
-sub4 :: W4 -> W4 -> (W4, Word64)
-sub4 (W4 a0 a1 a2 a3) (W4 b0 b1 b2 b3) =
-  let !(s0, c0) = sbb a0 b0 0
-      !(s1, c1) = sbb a1 b1 c0
-      !(s2, c2) = sbb a2 b2 c1
-      !(s3, c3) = sbb a3 b3 c2
-  in  (W4 s0 s1 s2 s3, c3)
-{-# INLINE sub4 #-}
-
--- x if the bit is 1, y if it is 0.
-select :: Word64 -> W4 -> W4 -> W4
-select bit (W4 x0 x1 x2 x3) (W4 y0 y1 y2 y3) =
-  let !m = negate bit
-      f x y = (x .&. m) .|. (y .&. complement m)
-  in  W4 (f x0 y0) (f x1 y1) (f x2 y2) (f x3 y3)
-{-# INLINE select #-}
-
--- x mod n, for any 256-bit x (one subtraction suffices, as 2^256 < 2n).
-reduce_n :: W4 -> W4
-reduce_n x =
-  let !(t, borrow) = sub4 x _N
-  in  select borrow x t
-
--- a + b mod n, for a, b < n.
-add_mod_n :: W4 -> W4 -> W4
-add_mod_n a b =
-  let !(s, carry)  = add4 a b
-      !(t, borrow) = sub4 s _N
-  in  select (carry .|. (borrow `xor` 1)) t s
-
--- a * b mod n, for a, b < n, by double-and-add over all 256 bits of b.
-mul_mod_n :: W4 -> W4 -> W4
-mul_mod_n a (W4 b0 b1 b2 b3) = go (255 :: Int) (W4 0 0 0 0) where
-  go !i !acc
-    | i < 0     = acc
-    | otherwise =
-        let !d   = add_mod_n acc acc
-            !bit = (limb (i `shiftR` 6) `shiftR` (i .&. 63)) .&. 1
-        in  go (i - 1) (select bit (add_mod_n d a) d)
-  limb :: Int -> Word64
-  limb j = case j of
-    0 -> b0
-    1 -> b1
-    2 -> b2
-    _ -> b3
+-- The secret key for a nonzero scalar. Reduction, arithmetic and the
+-- zero check are constant-time (ppad-fixed).
+to_seckey :: SC.Montgomery -> Maybe Seckey
+to_seckey r
+  | C.decide (SC.eq r 0) = Nothing
+  | otherwise            = Just (Seckey (S.unroll32 (SC.retr r)))
 
 -- per-commitment secrets -----------------------------------------------------
 
