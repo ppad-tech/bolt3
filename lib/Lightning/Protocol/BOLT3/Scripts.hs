@@ -1,6 +1,5 @@
-{-# OPTIONS_HADDOCK prune #-}
+{-# OPTIONS_HADDOCK hide #-}
 {-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE OverloadedStrings #-}
 
 -- |
 -- Module: Lightning.Protocol.BOLT3.Scripts
@@ -8,17 +7,7 @@
 -- License: MIT
 -- Maintainer: Jared Tobin <jared@ppad.tech>
 --
--- Script templates for BOLT #3 transaction outputs.
---
--- Includes witness scripts for:
---
--- * Funding output (2-of-2 multisig)
--- * to_local output (revocable with CSV delay)
--- * to_remote output (P2WPKH or anchored)
--- * Anchor outputs
--- * Offered HTLC outputs
--- * Received HTLC outputs
--- * HTLC-timeout/success output (revocable with delay)
+-- Scripts and witnesses for BOLT #3 transaction outputs.
 
 module Lightning.Protocol.BOLT3.Scripts (
     -- * Funding output
@@ -31,7 +20,8 @@ module Lightning.Protocol.BOLT3.Scripts (
   , to_local_witness_revoke
 
     -- * to_remote output
-  , to_remote_script
+  , to_remote_witness_script
+  , to_remote_script_pubkey
   , to_remote_witness
 
     -- * Anchor outputs
@@ -39,639 +29,475 @@ module Lightning.Protocol.BOLT3.Scripts (
   , anchor_witness_owner
   , anchor_witness_anyone
 
-    -- * Offered HTLC output
+    -- * Offered HTLC outputs
   , offered_htlc_script
   , offered_htlc_witness_preimage
   , offered_htlc_witness_revoke
 
-    -- * Received HTLC output
+    -- * Received HTLC outputs
   , received_htlc_script
   , received_htlc_witness_timeout
   , received_htlc_witness_revoke
 
-    -- * HTLC-timeout/success output (same as to_local)
-  , htlc_output_script
-  , htlc_output_witness_spend
-  , htlc_output_witness_revoke
+    -- * HTLC transaction inputs
+  , htlc_success_witness
+  , htlc_timeout_witness
+  , remote_htlc_sighash
 
-    -- * P2WSH helpers
+    -- * P2WSH
   , to_p2wsh
-  , witness_script_hash
   ) where
 
+import Bitcoin.Prim.Tx (Witness(..))
+import Bitcoin.Prim.Tx.Sighash (SighashType(..))
+import qualified Crypto.Hash.RIPEMD160 as RIPEMD160
+import qualified Crypto.Hash.SHA256 as SHA256
 import Data.Bits ((.&.), shiftR)
-import Data.Word (Word8, Word16, Word32)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as BSB
 import qualified Data.ByteString.Lazy as BSL
-import qualified Crypto.Hash.SHA256 as SHA256
-import qualified Crypto.Hash.RIPEMD160 as RIPEMD160
+import Data.Word (Word8, Word16, Word32)
+import Lightning.Protocol.BOLT1 (Point, PaymentPreimage)
+import qualified Lightning.Protocol.BOLT1 as BOLT1
 import Lightning.Protocol.BOLT3.Types
 
--- opcodes ---------------------------------------------------------------------
+-- opcodes --------------------------------------------------------------------
 
--- | OP_0 / OP_FALSE (0x00)
-op_0 :: Word8
-op_0 = 0x00
-
--- | OP_PUSHDATA for 1-75 bytes just uses the length as opcode
--- For data <=75 bytes, opcode is just the length
-
--- | OP_IF (0x63)
-op_if :: Word8
-op_if = 0x63
-
--- | OP_NOTIF (0x64)
-op_notif :: Word8
-op_notif = 0x64
-
--- | OP_ELSE (0x67)
-op_else :: Word8
-op_else = 0x67
-
--- | OP_ENDIF (0x68)
-op_endif :: Word8
-op_endif = 0x68
-
--- | OP_DROP (0x75)
-op_drop :: Word8
-op_drop = 0x75
-
--- | OP_DUP (0x76)
-op_dup :: Word8
-op_dup = 0x76
-
--- | OP_SWAP (0x7c)
-op_swap :: Word8
-op_swap = 0x7c
-
--- | OP_SIZE (0x82)
-op_size :: Word8
-op_size = 0x82
-
--- | OP_EQUAL (0x87)
-op_equal :: Word8
-op_equal = 0x87
-
--- | OP_EQUALVERIFY (0x88)
-op_equalverify :: Word8
-op_equalverify = 0x88
-
--- | OP_IFDUP (0x73)
-op_ifdup :: Word8
-op_ifdup = 0x73
-
--- | OP_HASH160 (0xa9)
-op_hash160 :: Word8
-op_hash160 = 0xa9
-
--- | OP_CHECKSIG (0xac)
-op_checksig :: Word8
-op_checksig = 0xac
-
--- | OP_CHECKSIGVERIFY (0xad)
-op_checksigverify :: Word8
-op_checksigverify = 0xad
-
--- | OP_CHECKMULTISIG (0xae)
-op_checkmultisig :: Word8
-op_checkmultisig = 0xae
-
--- | OP_CHECKLOCKTIMEVERIFY (0xb1)
-op_checklocktimeverify :: Word8
-op_checklocktimeverify = 0xb1
-
--- | OP_CHECKSEQUENCEVERIFY (0xb2)
-op_checksequenceverify :: Word8
-op_checksequenceverify = 0xb2
-
--- | OP_1 (0x51)
-op_1 :: Word8
-op_1 = 0x51
-
--- | OP_2 (0x52)
-op_2 :: Word8
-op_2 = 0x52
-
--- | OP_16 (0x60)
-op_16 :: Word8
+op_0, op_1, op_2, op_16 :: Word8
+op_0  = 0x00
+op_1  = 0x51
+op_2  = 0x52
 op_16 = 0x60
 
--- helpers ---------------------------------------------------------------------
+op_if, op_notif, op_else, op_endif, op_drop, op_dup, op_ifdup :: Word8
+op_if    = 0x63
+op_notif = 0x64
+op_else  = 0x67
+op_endif = 0x68
+op_ifdup = 0x73
+op_drop  = 0x75
+op_dup   = 0x76
 
--- | Push a bytestring onto the stack (handles length encoding).
---
--- For data <= 75 bytes, the length itself is the opcode.
-push_data :: BS.ByteString -> BSB.Builder
-push_data !bs
-  | len <= 75 = BSB.word8 (fromIntegral len) <> BSB.byteString bs
-  | len <= 255 = BSB.word8 0x4c <> BSB.word8 (fromIntegral len)
-                 <> BSB.byteString bs
-  | len <= 65535 = BSB.word8 0x4d <> BSB.word16LE (fromIntegral len)
-                   <> BSB.byteString bs
-  | otherwise = BSB.word8 0x4e <> BSB.word32LE (fromIntegral len)
-                <> BSB.byteString bs
+op_swap, op_size, op_equal, op_equalverify, op_hash160 :: Word8
+op_swap        = 0x7c
+op_size        = 0x82
+op_equal       = 0x87
+op_equalverify = 0x88
+op_hash160     = 0xa9
+
+op_checksig, op_checksigverify, op_checkmultisig :: Word8
+op_checksig       = 0xac
+op_checksigverify = 0xad
+op_checkmultisig  = 0xae
+
+op_checklocktimeverify, op_checksequenceverify :: Word8
+op_checklocktimeverify = 0xb1
+op_checksequenceverify = 0xb2
+
+-- helpers --------------------------------------------------------------------
+
+op :: Word8 -> BSB.Builder
+op = BSB.word8
+{-# INLINE op #-}
+
+-- Push data of at most 75 bytes (all pushes here are keys, hashes or
+-- short numbers).
+push :: BS.ByteString -> BSB.Builder
+push bs = BSB.word8 (fromIntegral (BS.length bs)) <> BSB.byteString bs
+{-# INLINE push #-}
+
+push_point :: Point -> BSB.Builder
+push_point = push . BOLT1.un_point
+{-# INLINE push_point #-}
+
+-- Push a non-negative number, minimally encoded.
+push_num :: Word32 -> BSB.Builder
+push_num n
+  | n == 0    = op op_0
+  | n <= 16   = op (0x50 + fromIntegral n)
+  | otherwise = push (BS.pack (signed (le n)))
   where
-    !len = BS.length bs
-{-# INLINE push_data #-}
+    -- little-endian magnitude
+    le :: Word32 -> [Word8]
+    le !x
+      | x == 0    = []
+      | otherwise = fromIntegral (x .&. 0xff) : le (x `shiftR` 8)
 
--- | Encode a Word16 as minimal script number (for CSV delays).
-push_csv_delay :: Word16 -> BSB.Builder
-push_csv_delay !n
-  | n == 0 = BSB.word8 op_0
-  | n <= 16 = BSB.word8 (0x50 + fromIntegral n)
-  | n <= 0x7f = push_data (BS.singleton (fromIntegral n))
-  | n <= 0x7fff = push_data (BS.pack [lo, hi])
-  | otherwise = push_data (BS.pack [lo, hi, 0x00])  -- need sign byte
-  where
-    !lo = fromIntegral (n .&. 0xff)
-    !hi = fromIntegral ((n `shiftR` 8) .&. 0xff)
-{-# INLINE push_csv_delay #-}
+    -- append a sign byte if the top bit is set
+    signed bs = case reverse bs of
+      (h : _) | h .&. 0x80 /= 0 -> bs <> [0x00]
+      _ -> bs
 
--- | Encode a Word32 as minimal script number (for CLTV).
-push_cltv :: Word32 -> BSB.Builder
-push_cltv !n
-  | n == 0 = BSB.word8 op_0
-  | n <= 16 = BSB.word8 (0x50 + fromIntegral n)
-  | otherwise = push_data (encode_scriptnum n)
-  where
-    encode_scriptnum :: Word32 -> BS.ByteString
-    encode_scriptnum 0 = BS.empty
-    encode_scriptnum !v =
-      let -- Build bytes little-endian (LSB first)
-          go :: Word32 -> [Word8]
-          go 0 = []
-          go !x = fromIntegral (x .&. 0xff) : go (x `shiftR` 8)
-          !bytes = go v
-          -- If MSB has high bit set, need 0x00 suffix for positive numbers
-          !result = case reverse bytes of
-            [] -> bytes
-            (msb:_) | msb .&. 0x80 /= 0 -> bytes ++ [0x00]
-            _ -> bytes
-      in BS.pack result
-{-# INLINE push_cltv #-}
+push_delay :: Word16 -> BSB.Builder
+push_delay = push_num . fromIntegral
+{-# INLINE push_delay #-}
 
--- | Build script from builder.
-build_script :: BSB.Builder -> Script
-build_script = Script . BSL.toStrict . BSB.toLazyByteString
-{-# INLINE build_script #-}
+script :: BSB.Builder -> Script
+script = Script . BSL.toStrict . BSB.toLazyByteString
+{-# INLINE script #-}
 
--- | HASH160 = RIPEMD160(SHA256(x))
 hash160 :: BS.ByteString -> BS.ByteString
 hash160 = RIPEMD160.hash . SHA256.hash
 {-# INLINE hash160 #-}
 
--- P2WSH helpers ---------------------------------------------------------------
+-- Append a witness script to a witness stack.
+with_script :: [BS.ByteString] -> Script -> Witness
+with_script items (Script s) = Witness (items <> [s])
+{-# INLINE with_script #-}
 
--- | Compute SHA256 hash of a witness script.
---
--- >>> witness_script_hash (Script "some_script")
--- <32-byte SHA256 hash>
-witness_script_hash :: Script -> BS.ByteString
-witness_script_hash (Script !s) = SHA256.hash s
-{-# INLINE witness_script_hash #-}
+-- P2WSH ----------------------------------------------------------------------
 
--- | Convert a witness script to P2WSH scriptPubKey.
---
--- P2WSH format: OP_0 <32-byte-hash>
---
--- >>> to_p2wsh some_witness_script
--- Script "\x00\x20<32-byte-hash>"
+-- | The P2WSH scriptPubKey for a witness script:
+--   @0 \<SHA256(script)\>@.
 to_p2wsh :: Script -> Script
-to_p2wsh !script =
-  let !h = witness_script_hash script
-  in build_script (BSB.word8 op_0 <> push_data h)
-{-# INLINE to_p2wsh #-}
+to_p2wsh (Script s) = script (op op_0 <> push (SHA256.hash s))
 
--- funding output --------------------------------------------------------------
+-- funding output -------------------------------------------------------------
 
--- | Funding output witness script (2-of-2 multisig).
+-- | The funding output's witness script:
 --
--- Script: @2 <pubkey1> <pubkey2> 2 OP_CHECKMULTISIG@
+--   @2 \<pubkey1\> \<pubkey2\> 2 OP_CHECKMULTISIG@
 --
--- Where pubkey1 is lexicographically lesser.
---
--- >>> funding_script pk1 pk2
--- Script "R!<pk_lesser>!<pk_greater>R\xae"
+--   where @pubkey1@ is the lexicographically lesser of the two funding
+--   pubkeys. The argument order doesn't matter.
 funding_script :: FundingPubkey -> FundingPubkey -> Script
-funding_script (FundingPubkey (Pubkey !pk1)) (FundingPubkey (Pubkey !pk2)) =
-  let (!lesser, !greater) = if pk1 <= pk2 then (pk1, pk2) else (pk2, pk1)
-  in build_script $
-       BSB.word8 op_2
-       <> push_data lesser
-       <> push_data greater
-       <> BSB.word8 op_2
-       <> BSB.word8 op_checkmultisig
+funding_script (FundingPubkey a) (FundingPubkey b) =
+  let (lo, hi) = if a <= b then (a, b) else (b, a)
+  in  script $
+           op op_2 <> push_point lo <> push_point hi
+        <> op op_2 <> op op_checkmultisig
 
--- | Witness for spending funding output.
+-- | The witness spending the funding output, given each party's
+--   funding pubkey and signature (DER-encoded, with sighash byte):
 --
--- Witness: @0 <sig1> <sig2>@
+--   @0 \<signature_for_pubkey1\> \<signature_for_pubkey2\> \<script\>@
 --
--- Signatures ordered to match pubkey order in script.
---
--- >>> funding_witness sig1 sig2
--- Witness ["", sig1, sig2]
-funding_witness :: BS.ByteString -> BS.ByteString -> Witness
-funding_witness !sig1 !sig2 = Witness [BS.empty, sig1, sig2]
+--   The signatures are ordered to match the pubkeys in
+--   'funding_script', so the argument order doesn't matter.
+funding_witness
+  :: FundingPubkey -> BS.ByteString
+  -> FundingPubkey -> BS.ByteString
+  -> Witness
+funding_witness pa@(FundingPubkey a) sa pb@(FundingPubkey b) sb =
+  let (s1, s2) = if a <= b then (sa, sb) else (sb, sa)
+  in  with_script [BS.empty, s1, s2] (funding_script pa pb)
 
--- to_local output -------------------------------------------------------------
+-- to_local output ------------------------------------------------------------
 
--- | to_local witness script (revocable with CSV delay).
+-- | The @to_local@ output's witness script:
 --
--- Script:
+--   @
+--   OP_IF
+--       \<revocationpubkey\>
+--   OP_ELSE
+--       \<to_self_delay\> OP_CHECKSEQUENCEVERIFY OP_DROP
+--       \<local_delayedpubkey\>
+--   OP_ENDIF
+--   OP_CHECKSIG
+--   @
 --
--- @
--- OP_IF
---     <revocationpubkey>
--- OP_ELSE
---     <to_self_delay>
---     OP_CHECKSEQUENCEVERIFY
---     OP_DROP
---     <local_delayedpubkey>
--- OP_ENDIF
--- OP_CHECKSIG
--- @
---
--- >>> to_local_script revpk delay localpk
--- Script "c!<revpk>g<delay>\xb2u!<localpk>h\xac"
+--   HTLC-success and HTLC-timeout transaction outputs use the same
+--   script.
 to_local_script
   :: RevocationPubkey
   -> ToSelfDelay
   -> LocalDelayedPubkey
   -> Script
 to_local_script
-  (RevocationPubkey (Pubkey !revpk))
-  (ToSelfDelay !delay)
-  (LocalDelayedPubkey (Pubkey !localpk)) =
-    build_script $
-      BSB.word8 op_if
-      <> push_data revpk
-      <> BSB.word8 op_else
-      <> push_csv_delay delay
-      <> BSB.word8 op_checksequenceverify
-      <> BSB.word8 op_drop
-      <> push_data localpk
-      <> BSB.word8 op_endif
-      <> BSB.word8 op_checksig
+  (RevocationPubkey rev)
+  (ToSelfDelay delay)
+  (LocalDelayedPubkey delayed) = script $
+       op op_if
+    <> push_point rev
+    <> op op_else
+    <> push_delay delay
+    <> op op_checksequenceverify
+    <> op op_drop
+    <> push_point delayed
+    <> op op_endif
+    <> op op_checksig
 
--- | Witness for delayed spend of to_local output.
+-- | The witness for the owner's delayed spend of a @to_local@ (or
+--   HTLC transaction) output, given its witness script:
 --
--- Input nSequence must be set to to_self_delay.
+--   @\<local_delayedsig\> \<\> \<script\>@
 --
--- Witness: @<local_delayedsig> <>@
---
--- >>> to_local_witness_spend sig
--- Witness [sig, ""]
-to_local_witness_spend :: BS.ByteString -> Witness
-to_local_witness_spend !sig = Witness [sig, BS.empty]
+--   The spending input's @nSequence@ must be @to_self_delay@.
+to_local_witness_spend :: BS.ByteString -> Script -> Witness
+to_local_witness_spend sig = with_script [sig, BS.empty]
 
--- | Witness for revocation spend of to_local output.
+-- | The witness for the revocation spend of a @to_local@ (or HTLC
+--   transaction) output, given its witness script:
 --
--- Witness: @<revocation_sig> 1@
---
--- >>> to_local_witness_revoke sig
--- Witness [sig, "\x01"]
-to_local_witness_revoke :: BS.ByteString -> Witness
-to_local_witness_revoke !sig = Witness [sig, BS.singleton 0x01]
+--   @\<revocation_sig\> 1 \<script\>@
+to_local_witness_revoke :: BS.ByteString -> Script -> Witness
+to_local_witness_revoke sig = with_script [sig, BS.singleton 0x01]
 
--- to_remote output ------------------------------------------------------------
+-- to_remote output -----------------------------------------------------------
 
--- | to_remote witness script.
+-- | The @to_remote@ output's witness script under 'Anchors':
 --
--- With option_anchors:
+--   @\<remotepubkey\> OP_CHECKSIGVERIFY 1 OP_CHECKSEQUENCEVERIFY@
 --
--- @
--- <remotepubkey> OP_CHECKSIGVERIFY 1 OP_CHECKSEQUENCEVERIFY
--- @
---
--- Without option_anchors: P2WPKH (just the pubkey hash).
---
--- >>> to_remote_script pk (ChannelFeatures True)
--- Script "!<pk>\xadQ\xb2"
-to_remote_script :: RemotePubkey -> ChannelFeatures -> Script
-to_remote_script (RemotePubkey (Pubkey !pk)) !features
-  | has_anchors features =
-      -- Anchors: script with 1-block CSV
-      build_script $
-        push_data pk
-        <> BSB.word8 op_checksigverify
-        <> BSB.word8 op_1
-        <> BSB.word8 op_checksequenceverify
-  | otherwise =
-      -- No anchors: P2WPKH (OP_0 <20-byte-hash>)
-      let !h = hash160 pk
-      in build_script (BSB.word8 op_0 <> push_data h)
+--   (Under 'StaticRemotekey' the output is P2WPKH, with no witness
+--   script; see 'to_remote_script_pubkey'.)
+to_remote_witness_script :: RemotePubkey -> Script
+to_remote_witness_script (RemotePubkey pk) = script $
+     push_point pk
+  <> op op_checksigverify
+  <> op op_1
+  <> op op_checksequenceverify
 
--- | Witness for spending to_remote output.
---
--- With option_anchors (P2WSH), input nSequence must be 1.
--- Witness: @<remote_sig>@ (witness script appended by caller)
---
--- Without option_anchors (P2WPKH):
--- Witness: @<remote_sig> <remotepubkey>@
---
--- >>> to_remote_witness sig pk (ChannelFeatures False)
--- Witness [sig, pk]
-to_remote_witness :: BS.ByteString -> RemotePubkey -> ChannelFeatures -> Witness
-to_remote_witness !sig (RemotePubkey (Pubkey !pk)) !features
-  | has_anchors features = Witness [sig]
-  | otherwise = Witness [sig, pk]
+-- | The @to_remote@ output's scriptPubKey: P2WPKH to @remotepubkey@
+--   under 'StaticRemotekey', and P2WSH of 'to_remote_witness_script'
+--   under 'Anchors'.
+to_remote_script_pubkey :: RemotePubkey -> CommitmentFormat -> Script
+to_remote_script_pubkey pk@(RemotePubkey p) fmt = case fmt of
+  StaticRemotekey -> script (op op_0 <> push (hash160 (BOLT1.un_point p)))
+  Anchors         -> to_p2wsh (to_remote_witness_script pk)
 
--- anchor outputs --------------------------------------------------------------
+-- | The witness spending a @to_remote@ output: @\<remote_sig\>
+--   \<remotepubkey\>@ (P2WPKH) under 'StaticRemotekey', and
+--   @\<remote_sig\> \<script\>@ under 'Anchors', where the spending
+--   input's @nSequence@ must be 1.
+to_remote_witness
+  :: BS.ByteString -> RemotePubkey -> CommitmentFormat -> Witness
+to_remote_witness sig pk@(RemotePubkey p) fmt = case fmt of
+  StaticRemotekey -> Witness [sig, BOLT1.un_point p]
+  Anchors         -> with_script [sig] (to_remote_witness_script pk)
 
--- | Anchor output witness script.
+-- anchor outputs -------------------------------------------------------------
+
+-- | An anchor output's witness script, for the funding pubkey of the
+--   party it belongs to:
 --
--- Script:
---
--- @
--- <funding_pubkey> OP_CHECKSIG OP_IFDUP
--- OP_NOTIF
---     OP_16 OP_CHECKSEQUENCEVERIFY
--- OP_ENDIF
--- @
---
--- >>> anchor_script fundpk
--- Script "!<fundpk>\xac\x73d`\xb2h"
+--   @
+--   \<funding_pubkey\> OP_CHECKSIG OP_IFDUP
+--   OP_NOTIF
+--       OP_16 OP_CHECKSEQUENCEVERIFY
+--   OP_ENDIF
+--   @
 anchor_script :: FundingPubkey -> Script
-anchor_script (FundingPubkey (Pubkey !pk)) =
-  build_script $
-    push_data pk
-    <> BSB.word8 op_checksig
-    <> BSB.word8 op_ifdup
-    <> BSB.word8 op_notif
-    <> BSB.word8 op_16
-    <> BSB.word8 op_checksequenceverify
-    <> BSB.word8 op_endif
+anchor_script (FundingPubkey pk) = script $
+     push_point pk
+  <> op op_checksig
+  <> op op_ifdup
+  <> op op_notif
+  <> op op_16
+  <> op op_checksequenceverify
+  <> op op_endif
 
--- | Witness for owner to spend anchor output.
---
--- Witness: @<sig>@
---
--- >>> anchor_witness_owner sig
--- Witness [sig]
-anchor_witness_owner :: BS.ByteString -> Witness
-anchor_witness_owner !sig = Witness [sig]
+-- | The witness for an anchor's owner to spend it:
+--   @\<sig\> \<script\>@.
+anchor_witness_owner :: BS.ByteString -> FundingPubkey -> Witness
+anchor_witness_owner sig pk = with_script [sig] (anchor_script pk)
 
--- | Witness for anyone to sweep anchor output after 16 blocks.
---
--- Witness: @<>@
---
--- >>> anchor_witness_anyone
--- Witness [""]
-anchor_witness_anyone :: Witness
-anchor_witness_anyone = Witness [BS.empty]
+-- | The witness for anyone to sweep an anchor, 16 blocks after the
+--   commitment transaction confirms: @\<\> \<script\>@.
+anchor_witness_anyone :: FundingPubkey -> Witness
+anchor_witness_anyone pk = with_script [BS.empty] (anchor_script pk)
 
--- offered HTLC output ---------------------------------------------------------
+-- offered HTLC outputs -------------------------------------------------------
 
--- | Offered HTLC witness script.
+-- csv suffix for anchors HTLC scripts
+htlc_csv :: CommitmentFormat -> BSB.Builder
+htlc_csv fmt = case fmt of
+  StaticRemotekey -> mempty
+  Anchors         -> op op_1 <> op op_checksequenceverify <> op op_drop
+{-# INLINE htlc_csv #-}
+
+-- | An offered HTLC output's witness script:
 --
--- Without option_anchors:
+--   @
+--   OP_DUP OP_HASH160 \<RIPEMD160(SHA256(revocationpubkey))\> OP_EQUAL
+--   OP_IF
+--       OP_CHECKSIG
+--   OP_ELSE
+--       \<remote_htlcpubkey\> OP_SWAP OP_SIZE 32 OP_EQUAL
+--       OP_NOTIF
+--           OP_DROP 2 OP_SWAP \<local_htlcpubkey\> 2 OP_CHECKMULTISIG
+--       OP_ELSE
+--           OP_HASH160 \<RIPEMD160(payment_hash)\> OP_EQUALVERIFY
+--           OP_CHECKSIG
+--       OP_ENDIF
+--   OP_ENDIF
+--   @
 --
--- @
--- OP_DUP OP_HASH160 <RIPEMD160(SHA256(revocationpubkey))> OP_EQUAL
--- OP_IF
---     OP_CHECKSIG
--- OP_ELSE
---     <remote_htlcpubkey> OP_SWAP OP_SIZE 32 OP_EQUAL
---     OP_NOTIF
---         OP_DROP 2 OP_SWAP <local_htlcpubkey> 2 OP_CHECKMULTISIG
---     OP_ELSE
---         OP_HASH160 <RIPEMD160(payment_hash)> OP_EQUALVERIFY
---         OP_CHECKSIG
---     OP_ENDIF
--- OP_ENDIF
--- @
---
--- With option_anchors, adds @1 OP_CHECKSEQUENCEVERIFY OP_DROP@ before
--- final OP_ENDIF.
+--   Under 'Anchors', @1 OP_CHECKSEQUENCEVERIFY OP_DROP@ precedes the
+--   final @OP_ENDIF@.
 offered_htlc_script
   :: RevocationPubkey
   -> RemoteHtlcPubkey
   -> LocalHtlcPubkey
-  -> PaymentHash
-  -> ChannelFeatures
+  -> BOLT1.PaymentHash
+  -> CommitmentFormat
   -> Script
 offered_htlc_script
-  (RevocationPubkey (Pubkey !revpk))
-  (RemoteHtlcPubkey (Pubkey !remotepk))
-  (LocalHtlcPubkey (Pubkey !localpk))
-  (PaymentHash !ph)
-  !features =
-    let !revpk_hash = hash160 revpk
-        !payment_hash160 = RIPEMD160.hash ph
-        !csv_suffix = if has_anchors features
-          then BSB.word8 op_1
-               <> BSB.word8 op_checksequenceverify
-               <> BSB.word8 op_drop
-          else mempty
-    in build_script $
-         -- OP_DUP OP_HASH160 <revpk_hash> OP_EQUAL
-         BSB.word8 op_dup
-         <> BSB.word8 op_hash160
-         <> push_data revpk_hash
-         <> BSB.word8 op_equal
-         -- OP_IF OP_CHECKSIG
-         <> BSB.word8 op_if
-         <> BSB.word8 op_checksig
-         -- OP_ELSE
-         <> BSB.word8 op_else
-         -- <remote_htlcpubkey> OP_SWAP OP_SIZE 32 OP_EQUAL
-         <> push_data remotepk
-         <> BSB.word8 op_swap
-         <> BSB.word8 op_size
-         <> push_data (BS.singleton 32)
-         <> BSB.word8 op_equal
-         -- OP_NOTIF
-         <> BSB.word8 op_notif
-         -- OP_DROP 2 OP_SWAP <local_htlcpubkey> 2 OP_CHECKMULTISIG
-         <> BSB.word8 op_drop
-         <> BSB.word8 op_2
-         <> BSB.word8 op_swap
-         <> push_data localpk
-         <> BSB.word8 op_2
-         <> BSB.word8 op_checkmultisig
-         -- OP_ELSE
-         <> BSB.word8 op_else
-         -- OP_HASH160 <payment_hash160> OP_EQUALVERIFY OP_CHECKSIG
-         <> BSB.word8 op_hash160
-         <> push_data payment_hash160
-         <> BSB.word8 op_equalverify
-         <> BSB.word8 op_checksig
-         -- OP_ENDIF
-         <> BSB.word8 op_endif
-         -- CSV suffix for anchors
-         <> csv_suffix
-         -- OP_ENDIF
-         <> BSB.word8 op_endif
+  (RevocationPubkey rev)
+  (RemoteHtlcPubkey remote)
+  (LocalHtlcPubkey local)
+  ph
+  fmt = script $
+       op op_dup <> op op_hash160
+    <> push (hash160 (BOLT1.un_point rev))
+    <> op op_equal
+    <> op op_if
+    <>   op op_checksig
+    <> op op_else
+    <>   push_point remote <> op op_swap <> op op_size
+    <>   push (BS.singleton 32) <> op op_equal
+    <>   op op_notif
+    <>     op op_drop <> op op_2 <> op op_swap
+    <>     push_point local <> op op_2 <> op op_checkmultisig
+    <>   op op_else
+    <>     op op_hash160
+    <>     push (RIPEMD160.hash (BOLT1.un_payment_hash ph))
+    <>     op op_equalverify <> op op_checksig
+    <>   op op_endif
+    <>   htlc_csv fmt
+    <> op op_endif
 
--- | Witness for remote node to claim offered HTLC with preimage.
+-- | The witness for the remote party to claim an offered HTLC output
+--   with the payment preimage, given its witness script:
 --
--- With option_anchors, input nSequence must be 1.
+--   @\<remotehtlcsig\> \<payment_preimage\> \<script\>@
 --
--- Witness: @<remotehtlcsig> <payment_preimage>@
---
--- >>> offered_htlc_witness_preimage sig preimage
--- Witness [sig, preimage]
+--   Under 'Anchors' the spending input's @nSequence@ must be 1.
 offered_htlc_witness_preimage
-  :: BS.ByteString -> PaymentPreimage -> Witness
-offered_htlc_witness_preimage !sig (PaymentPreimage !preimage) =
-  Witness [sig, preimage]
+  :: BS.ByteString -> PaymentPreimage -> Script -> Witness
+offered_htlc_witness_preimage sig pre =
+  with_script [sig, BOLT1.un_payment_preimage pre]
 
--- | Witness for revocation spend of offered HTLC.
+-- | The witness for the revocation spend of an offered HTLC output,
+--   given its witness script:
 --
--- Witness: @<revocation_sig> <revocationpubkey>@
---
--- >>> offered_htlc_witness_revoke sig revpk
--- Witness [sig, revpk]
-offered_htlc_witness_revoke :: BS.ByteString -> Pubkey -> Witness
-offered_htlc_witness_revoke !sig (Pubkey !revpk) = Witness [sig, revpk]
+--   @\<revocation_sig\> \<revocationpubkey\> \<script\>@
+offered_htlc_witness_revoke
+  :: BS.ByteString -> RevocationPubkey -> Script -> Witness
+offered_htlc_witness_revoke sig (RevocationPubkey rev) =
+  with_script [sig, BOLT1.un_point rev]
 
--- received HTLC output --------------------------------------------------------
+-- received HTLC outputs ------------------------------------------------------
 
--- | Received HTLC witness script.
+-- | A received HTLC output's witness script:
 --
--- Without option_anchors:
+--   @
+--   OP_DUP OP_HASH160 \<RIPEMD160(SHA256(revocationpubkey))\> OP_EQUAL
+--   OP_IF
+--       OP_CHECKSIG
+--   OP_ELSE
+--       \<remote_htlcpubkey\> OP_SWAP OP_SIZE 32 OP_EQUAL
+--       OP_IF
+--           OP_HASH160 \<RIPEMD160(payment_hash)\> OP_EQUALVERIFY
+--           2 OP_SWAP \<local_htlcpubkey\> 2 OP_CHECKMULTISIG
+--       OP_ELSE
+--           OP_DROP \<cltv_expiry\> OP_CHECKLOCKTIMEVERIFY OP_DROP
+--           OP_CHECKSIG
+--       OP_ENDIF
+--   OP_ENDIF
+--   @
 --
--- @
--- OP_DUP OP_HASH160 <RIPEMD160(SHA256(revocationpubkey))> OP_EQUAL
--- OP_IF
---     OP_CHECKSIG
--- OP_ELSE
---     <remote_htlcpubkey> OP_SWAP OP_SIZE 32 OP_EQUAL
---     OP_IF
---         OP_HASH160 <RIPEMD160(payment_hash)> OP_EQUALVERIFY
---         2 OP_SWAP <local_htlcpubkey> 2 OP_CHECKMULTISIG
---     OP_ELSE
---         OP_DROP <cltv_expiry> OP_CHECKLOCKTIMEVERIFY OP_DROP
---         OP_CHECKSIG
---     OP_ENDIF
--- OP_ENDIF
--- @
---
--- With option_anchors, adds @1 OP_CHECKSEQUENCEVERIFY OP_DROP@ before
--- final OP_ENDIF.
+--   Under 'Anchors', @1 OP_CHECKSEQUENCEVERIFY OP_DROP@ precedes the
+--   final @OP_ENDIF@.
 received_htlc_script
   :: RevocationPubkey
   -> RemoteHtlcPubkey
   -> LocalHtlcPubkey
-  -> PaymentHash
+  -> BOLT1.PaymentHash
   -> CltvExpiry
-  -> ChannelFeatures
+  -> CommitmentFormat
   -> Script
 received_htlc_script
-  (RevocationPubkey (Pubkey !revpk))
-  (RemoteHtlcPubkey (Pubkey !remotepk))
-  (LocalHtlcPubkey (Pubkey !localpk))
-  (PaymentHash !ph)
-  (CltvExpiry !expiry)
-  !features =
-    let !revpk_hash = hash160 revpk
-        !payment_hash160 = RIPEMD160.hash ph
-        !csv_suffix = if has_anchors features
-          then BSB.word8 op_1
-               <> BSB.word8 op_checksequenceverify
-               <> BSB.word8 op_drop
-          else mempty
-    in build_script $
-         -- OP_DUP OP_HASH160 <revpk_hash> OP_EQUAL
-         BSB.word8 op_dup
-         <> BSB.word8 op_hash160
-         <> push_data revpk_hash
-         <> BSB.word8 op_equal
-         -- OP_IF OP_CHECKSIG
-         <> BSB.word8 op_if
-         <> BSB.word8 op_checksig
-         -- OP_ELSE
-         <> BSB.word8 op_else
-         -- <remote_htlcpubkey> OP_SWAP OP_SIZE 32 OP_EQUAL
-         <> push_data remotepk
-         <> BSB.word8 op_swap
-         <> BSB.word8 op_size
-         <> push_data (BS.singleton 32)
-         <> BSB.word8 op_equal
-         -- OP_IF
-         <> BSB.word8 op_if
-         -- OP_HASH160 <payment_hash160> OP_EQUALVERIFY
-         <> BSB.word8 op_hash160
-         <> push_data payment_hash160
-         <> BSB.word8 op_equalverify
-         -- 2 OP_SWAP <local_htlcpubkey> 2 OP_CHECKMULTISIG
-         <> BSB.word8 op_2
-         <> BSB.word8 op_swap
-         <> push_data localpk
-         <> BSB.word8 op_2
-         <> BSB.word8 op_checkmultisig
-         -- OP_ELSE
-         <> BSB.word8 op_else
-         -- OP_DROP <cltv_expiry> OP_CHECKLOCKTIMEVERIFY OP_DROP OP_CHECKSIG
-         <> BSB.word8 op_drop
-         <> push_cltv expiry
-         <> BSB.word8 op_checklocktimeverify
-         <> BSB.word8 op_drop
-         <> BSB.word8 op_checksig
-         -- OP_ENDIF
-         <> BSB.word8 op_endif
-         -- CSV suffix for anchors
-         <> csv_suffix
-         -- OP_ENDIF
-         <> BSB.word8 op_endif
+  (RevocationPubkey rev)
+  (RemoteHtlcPubkey remote)
+  (LocalHtlcPubkey local)
+  ph
+  (CltvExpiry expiry)
+  fmt = script $
+       op op_dup <> op op_hash160
+    <> push (hash160 (BOLT1.un_point rev))
+    <> op op_equal
+    <> op op_if
+    <>   op op_checksig
+    <> op op_else
+    <>   push_point remote <> op op_swap <> op op_size
+    <>   push (BS.singleton 32) <> op op_equal
+    <>   op op_if
+    <>     op op_hash160
+    <>     push (RIPEMD160.hash (BOLT1.un_payment_hash ph))
+    <>     op op_equalverify
+    <>     op op_2 <> op op_swap <> push_point local
+    <>     op op_2 <> op op_checkmultisig
+    <>   op op_else
+    <>     op op_drop <> push_num expiry
+    <>     op op_checklocktimeverify <> op op_drop
+    <>     op op_checksig
+    <>   op op_endif
+    <>   htlc_csv fmt
+    <> op op_endif
 
--- | Witness for remote node to timeout received HTLC.
+-- | The witness for the remote party to time out a received HTLC
+--   output, given its witness script:
 --
--- With option_anchors, input nSequence must be 1.
+--   @\<remotehtlcsig\> \<\> \<script\>@
 --
--- Witness: @<remotehtlcsig> <>@
---
--- >>> received_htlc_witness_timeout sig
--- Witness [sig, ""]
-received_htlc_witness_timeout :: BS.ByteString -> Witness
-received_htlc_witness_timeout !sig = Witness [sig, BS.empty]
+--   Under 'Anchors' the spending input's @nSequence@ must be 1.
+received_htlc_witness_timeout :: BS.ByteString -> Script -> Witness
+received_htlc_witness_timeout sig = with_script [sig, BS.empty]
 
--- | Witness for revocation spend of received HTLC.
+-- | The witness for the revocation spend of a received HTLC output,
+--   given its witness script:
 --
--- Witness: @<revocation_sig> <revocationpubkey>@
---
--- >>> received_htlc_witness_revoke sig revpk
--- Witness [sig, revpk]
-received_htlc_witness_revoke :: BS.ByteString -> Pubkey -> Witness
-received_htlc_witness_revoke !sig (Pubkey !revpk) = Witness [sig, revpk]
+--   @\<revocation_sig\> \<revocationpubkey\> \<script\>@
+received_htlc_witness_revoke
+  :: BS.ByteString -> RevocationPubkey -> Script -> Witness
+received_htlc_witness_revoke sig (RevocationPubkey rev) =
+  with_script [sig, BOLT1.un_point rev]
 
--- HTLC-timeout/success output -------------------------------------------------
+-- HTLC transaction inputs ----------------------------------------------------
 
--- | HTLC output witness script (same structure as to_local).
+-- | The witness for an HTLC-success transaction's input, given both
+--   HTLC signatures, the payment preimage and the received HTLC
+--   output's witness script:
 --
--- Used for HTLC-timeout and HTLC-success transaction outputs.
+--   @0 \<remotehtlcsig\> \<localhtlcsig\> \<payment_preimage\> \<script\>@
 --
--- Script:
---
--- @
--- OP_IF
---     <revocationpubkey>
--- OP_ELSE
---     <to_self_delay>
---     OP_CHECKSEQUENCEVERIFY
---     OP_DROP
---     <local_delayedpubkey>
--- OP_ENDIF
--- OP_CHECKSIG
--- @
-htlc_output_script
-  :: RevocationPubkey
-  -> ToSelfDelay
-  -> LocalDelayedPubkey
-  -> Script
-htlc_output_script = to_local_script
+--   See 'remote_htlc_sighash' for the signatures' sighash types.
+htlc_success_witness
+  :: BS.ByteString    -- ^ remotehtlcsig
+  -> BS.ByteString    -- ^ localhtlcsig
+  -> PaymentPreimage
+  -> Script           -- ^ the received HTLC output's witness script
+  -> Witness
+htlc_success_witness remote local pre =
+  with_script [BS.empty, remote, local, BOLT1.un_payment_preimage pre]
 
--- | Witness for delayed spend of HTLC output.
+-- | The witness for an HTLC-timeout transaction's input, given both
+--   HTLC signatures and the offered HTLC output's witness script:
 --
--- Input nSequence must be set to to_self_delay.
+--   @0 \<remotehtlcsig\> \<localhtlcsig\> \<\> \<script\>@
 --
--- Witness: @<local_delayedsig> 0@
-htlc_output_witness_spend :: BS.ByteString -> Witness
-htlc_output_witness_spend = to_local_witness_spend
+--   See 'remote_htlc_sighash' for the signatures' sighash types.
+htlc_timeout_witness
+  :: BS.ByteString    -- ^ remotehtlcsig
+  -> BS.ByteString    -- ^ localhtlcsig
+  -> Script           -- ^ the offered HTLC output's witness script
+  -> Witness
+htlc_timeout_witness remote local =
+  with_script [BS.empty, remote, local, BS.empty]
 
--- | Witness for revocation spend of HTLC output.
+-- | The sighash type of @remotehtlcsig@: the signature on an
+--   HTLC-success or HTLC-timeout transaction that the commitment's
+--   non-owner sends in @commitment_signed@.
 --
--- Witness: @<revocationsig> 1@
-htlc_output_witness_revoke :: BS.ByteString -> Witness
-htlc_output_witness_revoke = to_local_witness_revoke
+--   Under 'Anchors' it is @SIGHASH_SINGLE|SIGHASH_ANYONECANPAY@, so
+--   that the owner can add inputs and outputs to pay the (otherwise
+--   zero) fee; under 'StaticRemotekey' it is @SIGHASH_ALL@. The
+--   owner's own signature, @localhtlcsig@, always uses @SIGHASH_ALL@.
+--
+--   >>> remote_htlc_sighash Anchors
+--   SIGHASH_SINGLE_ANYONECANPAY
+remote_htlc_sighash :: CommitmentFormat -> SighashType
+remote_htlc_sighash fmt = case fmt of
+  StaticRemotekey -> SIGHASH_ALL
+  Anchors         -> SIGHASH_SINGLE_ANYONECANPAY

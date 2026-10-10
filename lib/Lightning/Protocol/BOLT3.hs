@@ -6,176 +6,135 @@
 -- License: MIT
 -- Maintainer: Jared Tobin <jared@ppad.tech>
 --
--- Bitcoin transaction formats for the Lightning Network, per
--- [BOLT #3](https://github.com/lightning/bolts/blob/master/03-transactions.md).
+-- Bitcoin transaction and script formats for the Lightning Network, per
+-- [BOLT #3](https://github.com/lightning/bolts/blob/master/03-transactions.md)
+-- (commitment, HTLC and closing transactions, their output scripts and
+-- witnesses, per-commitment key derivation, and per-commitment secret
+-- generation and storage).
 --
--- = Overview
---
--- This library implements the transaction and script formats defined in
--- BOLT #3, including:
---
--- * Commitment transactions with to_local, to_remote, anchor, and HTLC
---   outputs
--- * HTLC-timeout and HTLC-success second-stage transactions
--- * Closing transactions (legacy and option_simple_close)
--- * Per-commitment key derivation and secret storage
--- * Transaction serialization and parsing
--- * Stateless validation
---
--- = Quick Start
---
--- @
--- import Lightning.Protocol.BOLT3
---
--- -- Build a commitment transaction
--- let ctx = CommitmentContext { ... }
---     tx = build_commitment_tx ctx
---
--- -- Serialize for signing
--- let bytes = encode_tx tx
---
--- -- Validate the transaction
--- case validate_commitment_tx dustLimit features tx of
---   Right () -> putStrLn "Valid"
---   Left err -> print err
--- @
---
--- = Modules
---
--- * "Lightning.Protocol.BOLT3.Types" - Core types (Satoshi, Pubkey, HTLC,
---   etc.)
--- * "Lightning.Protocol.BOLT3.Keys" - Per-commitment key derivation and
---   secret storage
--- * "Lightning.Protocol.BOLT3.Scripts" - Witness script templates (funding,
---   to_local, HTLC, anchor)
--- * "Lightning.Protocol.BOLT3.Tx" - Transaction assembly
--- * "Lightning.Protocol.BOLT3.Encode" - Transaction serialization
--- * "Lightning.Protocol.BOLT3.Decode" - Transaction parsing
--- * "Lightning.Protocol.BOLT3.Validate" - Stateless validation
+-- Amounts, points, hashes and per-commitment secrets are the types of
+-- ppad-bolt1's "Lightning.Protocol.BOLT1"; transactions convert to
+-- ppad-tx's "Bitcoin.Prim.Tx" for txids, sighashes and serialization.
+-- The @option_static_remotekey@ and @option_anchors@ commitment formats
+-- are supported ('CommitmentFormat').
 
 module Lightning.Protocol.BOLT3 (
-    -- * Types
-    -- ** Monetary amounts
-    Satoshi(..)
-  , MilliSatoshi(..)
-  , msatToSat
-  , satToMsat
+    -- * Commitment transactions
+    CommitmentContext(..)
+  , CommitmentFormat(..)
+  , CommitmentTx(..)
+  , CommitmentOutput(..)
+  , OutputType(..)
+  , build_commitment_tx
 
-    -- ** Keys and points
-  , Pubkey
-  , unPubkey
-  , pubkey
-  , Seckey
-  , unSeckey
-  , seckey
-  , Point
-  , unPoint
-  , point
-
-    -- ** Hashes
-  , PaymentHash
-  , unPaymentHash
-  , paymentHash
-  , PaymentPreimage
-  , unPaymentPreimage
-  , paymentPreimage
-
-    -- ** Transaction primitives
-  , TxId(..)
-  , mkTxId
-  , OutPoint(..)
-  , Sequence(..)
-  , Locktime(..)
+    -- ** HTLCs
+  , HTLC(..)
+  , HTLCDirection(..)
 
     -- ** Channel parameters
   , CommitmentNumber
-  , unCommitmentNumber
   , commitment_number
+  , un_commitment_number
   , next_commitment_number
   , ToSelfDelay(..)
   , CltvExpiry(..)
   , DustLimit(..)
   , FeeratePerKw(..)
+  , Locktime(..)
+  , Sequence(..)
 
-    -- ** HTLC types
-  , HTLC(..)
-  , HTLCDirection(..)
+    -- ** Fees and trimming
+  , commitment_fee
+  , htlc_timeout_fee
+  , htlc_success_fee
+  , htlc_trim_threshold
+  , is_trimmed
+  , anchor_output_value
 
-    -- ** Basepoints
-  , Basepoints(..)
-  , PerCommitmentPoint(..)
-  , PerCommitmentSecret
-  , unPerCommitmentSecret
-  , perCommitmentSecret
-  , RevocationBasepoint(..)
-  , PaymentBasepoint(..)
-  , DelayedPaymentBasepoint(..)
-  , HtlcBasepoint(..)
+    -- * HTLC transactions
+  , HTLCContext(..)
+  , HTLCTx(..)
+  , build_htlc_tx
 
-    -- ** Derived keys
-  , LocalPubkey(..)
-  , RemotePubkey(..)
-  , LocalDelayedPubkey(..)
-  , RemoteDelayedPubkey(..)
-  , LocalHtlcPubkey(..)
-  , RemoteHtlcPubkey(..)
-  , RevocationPubkey(..)
-  , FundingPubkey(..)
+    -- * Closing transactions
+  , ClosingTx(..)
+  , ClosingOutput(..)
+  , ClosingContext(..)
+  , ClosingOutputs(..)
+  , build_closing_tx
+  , LegacyClosingContext(..)
+  , build_legacy_closing_tx
 
-    -- ** Script and witness
-  , Script(..)
-  , Witness(..)
-
-    -- ** Channel features
-  , ChannelFeatures(..)
-  , has_anchors
-
-    -- ** Constants
-  , commitment_weight_no_anchors
-  , commitment_weight_anchors
-  , htlc_timeout_weight_no_anchors
-  , htlc_timeout_weight_anchors
-  , htlc_success_weight_no_anchors
-  , htlc_success_weight_anchors
-  , htlc_output_weight
+    -- ** Dust thresholds
   , dust_p2pkh
   , dust_p2sh
   , dust_p2wpkh
   , dust_p2wsh
-  , anchor_output_value
 
-    -- * Key derivation
+    -- * Serialization
+  , commitment_to_tx
+  , htlc_to_tx
+  , closing_to_tx
+  , encode_commitment_tx
+  , encode_htlc_tx
+  , encode_closing_tx
+
+    -- * Keys
+    -- ** Basepoints and per-commitment points
+  , Basepoints(..)
+  , RevocationBasepoint(..)
+  , PaymentBasepoint(..)
+  , DelayedPaymentBasepoint(..)
+  , HtlcBasepoint(..)
+  , PerCommitmentPoint(..)
   , derive_per_commitment_point
   , derive_per_commitment_point'
+
+    -- ** Public keys
+  , CommitmentKeys(..)
+  , derive_commitment_keys
+  , derive_commitment_keys'
+  , RevocationPubkey(..)
+  , LocalDelayedPubkey(..)
+  , LocalHtlcPubkey(..)
+  , RemoteHtlcPubkey(..)
+  , RemotePubkey(..)
+  , FundingPubkey(..)
   , derive_pubkey
-  , derive_pubkey'
-  , derive_localpubkey
-  , derive_localpubkey'
-  , derive_local_htlcpubkey
-  , derive_local_htlcpubkey'
-  , derive_remote_htlcpubkey
-  , derive_remote_htlcpubkey'
-  , derive_local_delayedpubkey
-  , derive_local_delayedpubkey'
-  , derive_remote_delayedpubkey
-  , derive_remote_delayedpubkey'
   , derive_revocationpubkey
 
-    -- ** Secret generation
-  , generate_from_seed
-  , derive_secret
+    -- ** Private keys
+  , Seckey
+  , seckey
+  , un_seckey
+  , derive_privkey
+  , derive_revocationprivkey
 
-    -- ** Secret storage
-  , SecretStore(..)
-  , SecretEntry(..)
-  , empty_store
+    -- * Per-commitment secrets
+  , Seed
+  , seed
+  , un_seed
+  , SecretIndex
+  , secret_index
+  , un_secret_index
+  , commitment_secret_index
+  , generate_from_seed
+
+    -- ** Storage
+  , SecretStore
+  , empty_secret_store
   , insert_secret
   , derive_old_secret
+  , secret_store
+  , un_secret_store
 
-    -- ** Commitment number
+    -- ** Commitment number obscuring
   , obscured_commitment_number
 
-    -- * Scripts
+    -- * Scripts and witnesses
+  , Script(..)
+  , to_p2wsh
+
     -- ** Funding output
   , funding_script
   , funding_witness
@@ -186,7 +145,8 @@ module Lightning.Protocol.BOLT3 (
   , to_local_witness_revoke
 
     -- ** to_remote output
-  , to_remote_script
+  , to_remote_witness_script
+  , to_remote_script_pubkey
   , to_remote_witness
 
     -- ** Anchor outputs
@@ -194,105 +154,23 @@ module Lightning.Protocol.BOLT3 (
   , anchor_witness_owner
   , anchor_witness_anyone
 
-    -- ** Offered HTLC
+    -- ** Offered HTLC outputs
   , offered_htlc_script
   , offered_htlc_witness_preimage
   , offered_htlc_witness_revoke
 
-    -- ** Received HTLC
+    -- ** Received HTLC outputs
   , received_htlc_script
   , received_htlc_witness_timeout
   , received_htlc_witness_revoke
 
-    -- ** HTLC output (same as to_local)
-  , htlc_output_script
-  , htlc_output_witness_spend
-  , htlc_output_witness_revoke
-
-    -- ** P2WSH helpers
-  , to_p2wsh
-  , witness_script_hash
-
-    -- * Transaction assembly
-    -- ** Commitment transactions
-  , CommitmentTx(..)
-  , CommitmentContext(..)
-  , CommitmentKeys(..)
-  , build_commitment_tx
-
-    -- ** HTLC transactions
-  , HTLCTx(..)
-  , HTLCContext(..)
-  , build_htlc_timeout_tx
-  , build_htlc_success_tx
-
-    -- ** Closing transactions
-  , ClosingTx(..)
-  , ClosingContext(..)
-  , build_closing_tx
-  , build_legacy_closing_tx
-
-    -- ** Transaction outputs
-  , TxOutput(..)
-  , OutputType(..)
-
-    -- ** Fee calculation
-  , commitment_fee
-  , commitment_weight
-  , htlc_timeout_fee
-  , htlc_success_fee
-
-    -- ** Trimming
-  , htlc_trim_threshold
-  , is_trimmed
-  , trimmed_htlcs
-  , untrimmed_htlcs
-
-    -- ** Output ordering
-  , sort_outputs
-
-    -- * Conversion to ppad-tx
-  , commitment_to_tx
-  , htlc_to_tx
-  , closing_to_tx
-
-    -- * Serialization
-  , encode_tx
-  , encode_htlc_tx
-  , encode_closing_tx
-  , encode_tx_for_signing
-  , encode_witness
-  , encode_funding_witness
-
-    -- * Parsing
-  , BT.Tx(..)
-  , BT.TxIn(..)
-  , BT.TxOut(BT.TxOut)
-  , BT.from_bytes
-  , decode_tx
-
-    -- * Validation
-  , ValidationError(..)
-  , validate_commitment_tx
-  , validate_commitment_locktime
-  , validate_commitment_sequence
-  , validate_htlc_tx
-  , validate_htlc_timeout_tx
-  , validate_htlc_success_tx
-  , validate_closing_tx
-  , validate_legacy_closing_tx
-  , validate_output_ordering
-  , validate_dust_limits
-  , validate_anchor_outputs
-  , validate_commitment_fee
-  , validate_htlc_fee
+    -- ** HTLC transaction inputs
+  , htlc_success_witness
+  , htlc_timeout_witness
+  , remote_htlc_sighash
   ) where
 
-import qualified Bitcoin.Prim.Tx as BT
-import Lightning.Protocol.BOLT3.Types
 import Lightning.Protocol.BOLT3.Keys
 import Lightning.Protocol.BOLT3.Scripts
 import Lightning.Protocol.BOLT3.Tx
-import Lightning.Protocol.BOLT3.Encode
-import Lightning.Protocol.BOLT3.Decode
-import Lightning.Protocol.BOLT3.Validate
+import Lightning.Protocol.BOLT3.Types

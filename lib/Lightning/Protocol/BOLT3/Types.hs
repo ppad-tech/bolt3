@@ -1,4 +1,4 @@
-{-# OPTIONS_HADDOCK prune #-}
+{-# OPTIONS_HADDOCK hide #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE DeriveGeneric #-}
 
@@ -8,252 +8,125 @@
 -- License: MIT
 -- Maintainer: Jared Tobin <jared@ppad.tech>
 --
--- Core types for BOLT #3 transaction and script formats.
+-- Types for BOLT #3 transaction and script formats.
 
 module Lightning.Protocol.BOLT3.Types (
-    -- * Monetary amounts (re-exported from BOLT1)
-    Satoshi(..)
-  , MilliSatoshi(..)
-  , msatToSat
-  , satToMsat
-
-    -- * Keys and points
-  , Pubkey(..)
-  , pubkey
+    -- * Points and keys
+    PerCommitmentPoint(..)
+  , RevocationBasepoint(..)
+  , PaymentBasepoint(..)
+  , DelayedPaymentBasepoint(..)
+  , HtlcBasepoint(..)
+  , Basepoints(..)
+  , RevocationPubkey(..)
+  , LocalDelayedPubkey(..)
+  , LocalHtlcPubkey(..)
+  , RemoteHtlcPubkey(..)
+  , RemotePubkey(..)
+  , FundingPubkey(..)
   , Seckey(..)
   , seckey
-  , Point(..)
-  , point
-  , unPoint
+  , un_seckey
 
-    -- * Hashes (re-exported from BOLT1)
-  , PaymentHash(..)
-  , paymentHash
-  , unPaymentHash
-  , PaymentPreimage(..)
-  , paymentPreimage
-  , unPaymentPreimage
-
-    -- * Transaction primitives
-  , TxId(..)
-  , mkTxId
-  , OutPoint(..)
-  , Sequence(..)
-  , Locktime(..)
+    -- * Per-commitment secrets
+  , Seed(..)
+  , seed
+  , un_seed
+  , SecretIndex(..)
+  , secret_index
+  , un_secret_index
+  , commitment_secret_index
 
     -- * Channel parameters
   , CommitmentNumber(..)
   , commitment_number
+  , un_commitment_number
   , next_commitment_number
   , ToSelfDelay(..)
   , CltvExpiry(..)
   , DustLimit(..)
   , FeeratePerKw(..)
+  , Locktime(..)
+  , Sequence(..)
+  , CommitmentFormat(..)
 
-    -- * HTLC types
+    -- * HTLCs
   , HTLC(..)
   , HTLCDirection(..)
 
-    -- * Basepoints
-  , Basepoints(..)
-  , PerCommitmentPoint(..)
-  , PerCommitmentSecret(..)
-  , perCommitmentSecret
-  , unPerCommitmentSecret
-  , RevocationBasepoint(..)
-  , PaymentBasepoint(..)
-  , DelayedPaymentBasepoint(..)
-  , HtlcBasepoint(..)
-
-    -- * Derived keys
-  , LocalPubkey(..)
-  , RemotePubkey(..)
-  , LocalDelayedPubkey(..)
-  , RemoteDelayedPubkey(..)
-  , LocalHtlcPubkey(..)
-  , RemoteHtlcPubkey(..)
-  , RevocationPubkey(..)
-  , FundingPubkey(..)
-
-    -- * Script
+    -- * Scripts
   , Script(..)
 
-    -- * Witness (re-exported from ppad-tx)
-  , Witness(..)
-
-    -- * Channel options
-  , ChannelFeatures(..)
-  , has_anchors
-
-    -- * Transaction weights (constants)
-  , commitment_weight_no_anchors
-  , commitment_weight_anchors
-  , htlc_timeout_weight_no_anchors
-  , htlc_timeout_weight_anchors
-  , htlc_success_weight_no_anchors
-  , htlc_success_weight_anchors
-  , htlc_output_weight
-
-    -- * Dust thresholds (constants)
+    -- * Dust thresholds
   , dust_p2pkh
   , dust_p2sh
   , dust_p2wpkh
   , dust_p2wsh
   , anchor_output_value
+
+    -- * Internal
+  , sat
+  , internal_error
   ) where
 
-import Bitcoin.Prim.Tx (TxId(..), mkTxId, OutPoint(..), Witness(..))
-import Data.Word (Word16, Word32, Word64)
+import Control.DeepSeq (NFData(..))
+import qualified Crypto.Curve.Secp256k1 as S
 import qualified Data.ByteString as BS
+import Data.Word (Word16, Word32, Word64)
 import GHC.Generics (Generic)
-import Lightning.Protocol.BOLT1.Prim
-  ( Satoshi(..), MilliSatoshi(..)
-  , satToMsat, msatToSat
-  , Point(..), point, unPoint
-  , PaymentHash(..), paymentHash, unPaymentHash
-  , PaymentPreimage(..), paymentPreimage, unPaymentPreimage
-  , PerCommitmentSecret(..), perCommitmentSecret
-  , unPerCommitmentSecret
-  )
+import Lightning.Protocol.BOLT1 (Point, Satoshi, MilliSatoshi, PaymentHash)
+import qualified Lightning.Protocol.BOLT1 as BOLT1
 
--- keys and points -------------------------------------------------------------
+-- internal ------------------------------------------------------------------
 
--- | Compressed public key (33 bytes).
-newtype Pubkey = Pubkey { unPubkey :: BS.ByteString }
+-- Abort on a state that the surrounding code rules out.
+internal_error :: a
+internal_error = error "ppad-bolt3: internal error, please report a bug!"
+{-# NOINLINE internal_error #-}
+
+-- A 'Satoshi' amount known to be at most 21 million BTC (a constant,
+-- or a value bounded by construction).
+sat :: Word64 -> Satoshi
+sat w = case BOLT1.satoshi w of
+  Just s  -> s
+  Nothing -> internal_error
+{-# INLINE sat #-}
+
+-- points and keys ------------------------------------------------------------
+
+-- | A per-commitment point, from which a commitment's keys are
+--   derived.
+newtype PerCommitmentPoint = PerCommitmentPoint Point
   deriving (Eq, Ord, Show, Generic)
 
--- | Parse a 33-byte compressed public key.
---
--- Returns Nothing if the input is not exactly 33 bytes.
---
--- >>> pubkey (BS.replicate 33 0x02)
--- Just (Pubkey ...)
--- >>> pubkey (BS.replicate 32 0x02)
--- Nothing
-pubkey :: BS.ByteString -> Maybe Pubkey
-pubkey bs
-  | BS.length bs == 33 = Just (Pubkey bs)
-  | otherwise = Nothing
-{-# INLINE pubkey #-}
+instance NFData PerCommitmentPoint
 
--- | Secret key (32 bytes).
-newtype Seckey = Seckey { unSeckey :: BS.ByteString }
-  deriving (Eq, Generic)
-
--- Don't show secret keys
-instance Show Seckey where
-  show _ = "Seckey <redacted>"
-
--- | Parse a 32-byte secret key.
---
--- Returns Nothing if the input is not exactly 32 bytes.
-seckey :: BS.ByteString -> Maybe Seckey
-seckey bs
-  | BS.length bs == 32 = Just (Seckey bs)
-  | otherwise = Nothing
-{-# INLINE seckey #-}
-
--- transaction primitives ------------------------------------------------------
-
--- | Transaction input sequence number.
-newtype Sequence = Sequence { unSequence :: Word32 }
+-- | A @revocation_basepoint@.
+newtype RevocationBasepoint = RevocationBasepoint Point
   deriving (Eq, Ord, Show, Generic)
 
--- | Transaction locktime.
-newtype Locktime = Locktime { unLocktime :: Word32 }
+instance NFData RevocationBasepoint
+
+-- | A @payment_basepoint@.
+newtype PaymentBasepoint = PaymentBasepoint Point
   deriving (Eq, Ord, Show, Generic)
 
--- channel parameters ----------------------------------------------------------
+instance NFData PaymentBasepoint
 
--- | 48-bit commitment number.
-newtype CommitmentNumber = CommitmentNumber
-  { unCommitmentNumber :: Word64 }
+-- | A @delayed_payment_basepoint@.
+newtype DelayedPaymentBasepoint = DelayedPaymentBasepoint Point
   deriving (Eq, Ord, Show, Generic)
 
--- | Parse a 48-bit commitment number.
---
--- Returns Nothing if the value exceeds 2^48 - 1.
-commitment_number :: Word64 -> Maybe CommitmentNumber
-commitment_number n
-  | n <= 281474976710655 = Just (CommitmentNumber n)
-  | otherwise = Nothing
-{-# INLINE commitment_number #-}
+instance NFData DelayedPaymentBasepoint
 
--- | Increment a commitment number by one.
---
--- Returns Nothing if the result would exceed 2^48 - 1.
---
--- >>> fmap next_commitment_number (commitment_number 0)
--- Just (Just (CommitmentNumber {unCommitmentNumber = 1}))
--- >>> fmap next_commitment_number (commitment_number 281474976710655)
--- Just Nothing
-next_commitment_number
-  :: CommitmentNumber -> Maybe CommitmentNumber
-next_commitment_number (CommitmentNumber n)
-  | n < 281474976710655 = Just (CommitmentNumber (n + 1))
-  | otherwise = Nothing
-{-# INLINE next_commitment_number #-}
-
--- | CSV delay for to_local outputs.
-newtype ToSelfDelay = ToSelfDelay { unToSelfDelay :: Word16 }
+-- | An @htlc_basepoint@.
+newtype HtlcBasepoint = HtlcBasepoint Point
   deriving (Eq, Ord, Show, Generic)
 
--- | CLTV expiry for HTLCs.
-newtype CltvExpiry = CltvExpiry { unCltvExpiry :: Word32 }
-  deriving (Eq, Ord, Show, Generic)
+instance NFData HtlcBasepoint
 
--- | Dust limit threshold.
-newtype DustLimit = DustLimit { unDustLimit :: Satoshi }
-  deriving (Eq, Ord, Show, Generic)
-
--- | Fee rate in satoshis per 1000 weight units.
-newtype FeeratePerKw = FeeratePerKw { unFeeratePerKw :: Word32 }
-  deriving (Eq, Ord, Show, Generic)
-
--- HTLC types ------------------------------------------------------------------
-
--- | Direction of an HTLC from the commitment tx owner's perspective.
-data HTLCDirection
-  = HTLCOffered   -- ^ We offered this HTLC (outgoing)
-  | HTLCReceived  -- ^ We received this HTLC (incoming)
-  deriving (Eq, Ord, Show, Generic)
-
--- | HTLC output details.
-data HTLC = HTLC
-  { htlc_direction    :: !HTLCDirection
-  , htlc_amount_msat  :: {-# UNPACK #-} !MilliSatoshi
-  , htlc_payment_hash :: {-# UNPACK #-} !PaymentHash
-  , htlc_cltv_expiry  :: {-# UNPACK #-} !CltvExpiry
-  } deriving (Eq, Show, Generic)
-
--- basepoints ------------------------------------------------------------------
-
--- | Per-commitment point (used to derive keys).
-newtype PerCommitmentPoint = PerCommitmentPoint
-  { unPerCommitmentPoint :: Point }
-  deriving (Eq, Ord, Show, Generic)
-
--- | Revocation basepoint.
-newtype RevocationBasepoint = RevocationBasepoint
-  { unRevocationBasepoint :: Point }
-  deriving (Eq, Ord, Show, Generic)
-
--- | Payment basepoint.
-newtype PaymentBasepoint = PaymentBasepoint
-  { unPaymentBasepoint :: Point }
-  deriving (Eq, Ord, Show, Generic)
-
--- | Delayed payment basepoint.
-newtype DelayedPaymentBasepoint = DelayedPaymentBasepoint
-  { unDelayedPaymentBasepoint :: Point }
-  deriving (Eq, Ord, Show, Generic)
-
--- | HTLC basepoint.
-newtype HtlcBasepoint = HtlcBasepoint
-  { unHtlcBasepoint :: Point }
-  deriving (Eq, Ord, Show, Generic)
-
--- | Collection of all basepoints for one party.
+-- | The four basepoints a party announces in @open_channel@ or
+--   @accept_channel@.
 data Basepoints = Basepoints
   { bp_revocation      :: !RevocationBasepoint
   , bp_payment         :: !PaymentBasepoint
@@ -261,113 +134,278 @@ data Basepoints = Basepoints
   , bp_htlc            :: !HtlcBasepoint
   } deriving (Eq, Show, Generic)
 
--- derived keys ----------------------------------------------------------------
+instance NFData Basepoints
 
--- | Local pubkey.
-newtype LocalPubkey = LocalPubkey { unLocalPubkey :: Pubkey }
+-- | A commitment's @revocationpubkey@.
+newtype RevocationPubkey = RevocationPubkey Point
   deriving (Eq, Ord, Show, Generic)
 
--- | Remote pubkey.
-newtype RemotePubkey = RemotePubkey
-  { unRemotePubkey :: Pubkey }
+instance NFData RevocationPubkey
+
+-- | A commitment's @local_delayedpubkey@: the owner's key for its
+--   delayed outputs.
+newtype LocalDelayedPubkey = LocalDelayedPubkey Point
   deriving (Eq, Ord, Show, Generic)
 
--- | Local delayed pubkey.
-newtype LocalDelayedPubkey = LocalDelayedPubkey
-  { unLocalDelayedPubkey :: Pubkey }
+instance NFData LocalDelayedPubkey
+
+-- | A commitment's @local_htlcpubkey@: the owner's HTLC key.
+newtype LocalHtlcPubkey = LocalHtlcPubkey Point
   deriving (Eq, Ord, Show, Generic)
 
--- | Remote delayed pubkey.
-newtype RemoteDelayedPubkey = RemoteDelayedPubkey
-  { unRemoteDelayedPubkey :: Pubkey }
+instance NFData LocalHtlcPubkey
+
+-- | A commitment's @remote_htlcpubkey@: the other party's HTLC key.
+newtype RemoteHtlcPubkey = RemoteHtlcPubkey Point
   deriving (Eq, Ord, Show, Generic)
 
--- | Local HTLC pubkey.
-newtype LocalHtlcPubkey = LocalHtlcPubkey
-  { unLocalHtlcPubkey :: Pubkey }
+instance NFData RemoteHtlcPubkey
+
+-- | A commitment's @remotepubkey@: the other party's
+--   @payment_basepoint@, which its @to_remote@ output pays.
+newtype RemotePubkey = RemotePubkey Point
   deriving (Eq, Ord, Show, Generic)
 
--- | Remote HTLC pubkey.
-newtype RemoteHtlcPubkey = RemoteHtlcPubkey
-  { unRemoteHtlcPubkey :: Pubkey }
+instance NFData RemotePubkey
+
+-- | A @funding_pubkey@.
+newtype FundingPubkey = FundingPubkey Point
   deriving (Eq, Ord, Show, Generic)
 
--- | Revocation pubkey.
-newtype RevocationPubkey = RevocationPubkey
-  { unRevocationPubkey :: Pubkey }
+instance NFData FundingPubkey
+
+-- | A secp256k1 secret key: 32 bytes encoding an integer in
+--   [1, n), for n the group order.
+--
+--   This is secret material: its 'Show' instance is redacted, and it
+--   has no 'Eq' instance.
+newtype Seckey = Seckey BS.ByteString
+
+instance Show Seckey where
+  showsPrec d _ = showParen (d > 10) $ showString "Seckey <redacted>"
+
+instance NFData Seckey where
+  rnf (Seckey bs) = rnf bs
+
+-- | Construct a 'Seckey' from 32 big-endian bytes. Fails unless the
+--   bytes encode an integer in [1, n).
+--
+--   >>> fmap (BS.length . un_seckey) (seckey (BS.replicate 32 0x01))
+--   Just 32
+--   >>> seckey (BS.replicate 32 0x00)
+--   Nothing
+--   >>> seckey (BS.replicate 32 0xff)
+--   Nothing
+seckey :: BS.ByteString -> Maybe Seckey
+seckey bs = do
+  w <- S.parse_int256 bs
+  if   S.ge w
+  then Just (Seckey bs)
+  else Nothing
+
+-- | The bytes of a 'Seckey'.
+un_seckey :: Seckey -> BS.ByteString
+un_seckey (Seckey bs) = bs
+{-# INLINE un_seckey #-}
+
+-- per-commitment secrets -----------------------------------------------------
+
+-- | The 32-byte seed from which a party generates its per-commitment
+--   secrets.
+--
+--   This is secret material: its 'Show' instance is redacted, and it
+--   has no 'Eq' instance.
+newtype Seed = Seed BS.ByteString
+
+instance Show Seed where
+  showsPrec d _ = showParen (d > 10) $ showString "Seed <redacted>"
+
+instance NFData Seed where
+  rnf (Seed bs) = rnf bs
+
+-- | Construct a 'Seed' from exactly 32 bytes.
+--
+--   >>> fmap (BS.length . un_seed) (seed (BS.replicate 32 0xff))
+--   Just 32
+--   >>> seed (BS.replicate 31 0xff)
+--   Nothing
+seed :: BS.ByteString -> Maybe Seed
+seed bs
+  | BS.length bs == 32 = Just (Seed bs)
+  | otherwise          = Nothing
+{-# INLINE seed #-}
+
+-- | The bytes of a 'Seed'.
+un_seed :: Seed -> BS.ByteString
+un_seed (Seed bs) = bs
+{-# INLINE un_seed #-}
+
+-- | The 48-bit index /I/ of a per-commitment secret. Secrets are
+--   used from index 2^48 - 1 downwards.
+newtype SecretIndex = SecretIndex Word64
   deriving (Eq, Ord, Show, Generic)
 
--- | Funding pubkey (used in 2-of-2 multisig).
-newtype FundingPubkey = FundingPubkey
-  { unFundingPubkey :: Pubkey }
+instance NFData SecretIndex
+
+-- | Construct a 'SecretIndex'. Fails at or above 2^48.
+--
+--   >>> secret_index 281474976710655
+--   Just (SecretIndex 281474976710655)
+--   >>> secret_index 281474976710656
+--   Nothing
+secret_index :: Word64 -> Maybe SecretIndex
+secret_index w
+  | w <= 0xFFFFFFFFFFFF = Just (SecretIndex w)
+  | otherwise           = Nothing
+{-# INLINE secret_index #-}
+
+-- | The value of a 'SecretIndex'.
+un_secret_index :: SecretIndex -> Word64
+un_secret_index (SecretIndex w) = w
+{-# INLINE un_secret_index #-}
+
+-- | The index of the per-commitment secret for a commitment number:
+--   2^48 - 1 - n.
+--
+--   >>> fmap commitment_secret_index (commitment_number 0)
+--   Just (SecretIndex 281474976710655)
+commitment_secret_index :: CommitmentNumber -> SecretIndex
+commitment_secret_index (CommitmentNumber n) = SecretIndex (0xFFFFFFFFFFFF - n)
+{-# INLINE commitment_secret_index #-}
+
+-- channel parameters ---------------------------------------------------------
+
+-- | A 48-bit commitment number.
+newtype CommitmentNumber = CommitmentNumber Word64
   deriving (Eq, Ord, Show, Generic)
 
--- script ----------------------------------------------------------------------
+instance NFData CommitmentNumber
 
--- | Bitcoin script (serialized).
-newtype Script = Script { unScript :: BS.ByteString }
+-- | Construct a 'CommitmentNumber'. Fails at or above 2^48.
+--
+--   >>> commitment_number 42
+--   Just (CommitmentNumber 42)
+--   >>> commitment_number 281474976710656
+--   Nothing
+commitment_number :: Word64 -> Maybe CommitmentNumber
+commitment_number n
+  | n <= 0xFFFFFFFFFFFF = Just (CommitmentNumber n)
+  | otherwise           = Nothing
+{-# INLINE commitment_number #-}
+
+-- | The value of a 'CommitmentNumber'.
+un_commitment_number :: CommitmentNumber -> Word64
+un_commitment_number (CommitmentNumber n) = n
+{-# INLINE un_commitment_number #-}
+
+-- | The next commitment number. Fails past 2^48 - 1.
+--
+--   >>> commitment_number 0 >>= next_commitment_number
+--   Just (CommitmentNumber 1)
+--   >>> commitment_number 281474976710655 >>= next_commitment_number
+--   Nothing
+next_commitment_number :: CommitmentNumber -> Maybe CommitmentNumber
+next_commitment_number (CommitmentNumber n)
+  | n < 0xFFFFFFFFFFFF = Just (CommitmentNumber (n + 1))
+  | otherwise          = Nothing
+{-# INLINE next_commitment_number #-}
+
+-- | The CSV delay (@to_self_delay@) on a commitment owner's outputs.
+newtype ToSelfDelay = ToSelfDelay Word16
   deriving (Eq, Ord, Show, Generic)
 
--- channel options -------------------------------------------------------------
+instance NFData ToSelfDelay
 
--- | Channel feature flags relevant to BOLT #3.
-data ChannelFeatures = ChannelFeatures
-  { cf_option_anchors :: !Bool
+-- | An HTLC's absolute CLTV expiry.
+newtype CltvExpiry = CltvExpiry Word32
+  deriving (Eq, Ord, Show, Generic)
+
+instance NFData CltvExpiry
+
+-- | A @dust_limit_satoshis@ threshold.
+newtype DustLimit = DustLimit Satoshi
+  deriving (Eq, Ord, Show, Generic)
+
+instance NFData DustLimit
+
+-- | A fee rate, in satoshis per 1000 weight units.
+newtype FeeratePerKw = FeeratePerKw Word32
+  deriving (Eq, Ord, Show, Generic)
+
+instance NFData FeeratePerKw
+
+-- | A transaction locktime.
+newtype Locktime = Locktime Word32
+  deriving (Eq, Ord, Show, Generic)
+
+instance NFData Locktime
+
+-- | A transaction input's sequence number.
+newtype Sequence = Sequence Word32
+  deriving (Eq, Ord, Show, Generic)
+
+instance NFData Sequence
+
+-- | The commitment format a channel uses, as fixed by its
+--   @channel_type@.
+data CommitmentFormat
+  = StaticRemotekey
+    -- ^ @option_static_remotekey@ without anchors: @to_remote@ is
+    --   P2WPKH and HTLC transactions pay their own fees.
+  | Anchors
+    -- ^ @option_anchors@: two anchor outputs, a CSV-locked
+    --   @to_remote@, and zero-fee HTLC transactions.
+  deriving (Eq, Ord, Show, Generic)
+
+instance NFData CommitmentFormat
+
+-- HTLCs ----------------------------------------------------------------------
+
+-- | The direction of an HTLC, from the commitment owner's point of
+--   view.
+data HTLCDirection
+  = HTLCOffered   -- ^ offered by the owner
+  | HTLCReceived  -- ^ received by the owner
+  deriving (Eq, Ord, Show, Generic)
+
+instance NFData HTLCDirection
+
+-- | An HTLC committed to a commitment transaction.
+data HTLC = HTLC
+  { htlc_direction    :: !HTLCDirection
+  , htlc_amount_msat  :: {-# UNPACK #-} !MilliSatoshi
+  , htlc_payment_hash :: !PaymentHash
+  , htlc_cltv_expiry  :: {-# UNPACK #-} !CltvExpiry
   } deriving (Eq, Show, Generic)
 
--- | Check if option_anchors is enabled.
-has_anchors :: ChannelFeatures -> Bool
-has_anchors = cf_option_anchors
-{-# INLINE has_anchors #-}
+instance NFData HTLC
 
--- transaction weights (constants from spec) -----------------------------------
+-- scripts --------------------------------------------------------------------
 
--- | Base commitment tx weight without option_anchors.
-commitment_weight_no_anchors :: Word64
-commitment_weight_no_anchors = 724
+-- | A serialized Bitcoin script.
+newtype Script = Script BS.ByteString
+  deriving (Eq, Ord, Show, Generic)
 
--- | Base commitment tx weight with option_anchors.
-commitment_weight_anchors :: Word64
-commitment_weight_anchors = 1124
+instance NFData Script
 
--- | HTLC-timeout tx weight without option_anchors.
-htlc_timeout_weight_no_anchors :: Word64
-htlc_timeout_weight_no_anchors = 663
+-- dust thresholds ------------------------------------------------------------
 
--- | HTLC-timeout tx weight with option_anchors.
-htlc_timeout_weight_anchors :: Word64
-htlc_timeout_weight_anchors = 666
-
--- | HTLC-success tx weight without option_anchors.
-htlc_success_weight_no_anchors :: Word64
-htlc_success_weight_no_anchors = 703
-
--- | HTLC-success tx weight with option_anchors.
-htlc_success_weight_anchors :: Word64
-htlc_success_weight_anchors = 706
-
--- | Weight added per HTLC output in commitment tx.
-htlc_output_weight :: Word64
-htlc_output_weight = 172
-
--- dust thresholds (constants from Bitcoin Core) -------------------------------
-
--- | P2PKH dust threshold (546 satoshis).
+-- | Bitcoin Core's P2PKH dust threshold (546 satoshis).
 dust_p2pkh :: Satoshi
-dust_p2pkh = Satoshi 546
+dust_p2pkh = sat 546
 
--- | P2SH dust threshold (540 satoshis).
+-- | Bitcoin Core's P2SH dust threshold (540 satoshis).
 dust_p2sh :: Satoshi
-dust_p2sh = Satoshi 540
+dust_p2sh = sat 540
 
--- | P2WPKH dust threshold (294 satoshis).
+-- | Bitcoin Core's P2WPKH dust threshold (294 satoshis).
 dust_p2wpkh :: Satoshi
-dust_p2wpkh = Satoshi 294
+dust_p2wpkh = sat 294
 
--- | P2WSH dust threshold (330 satoshis).
+-- | Bitcoin Core's P2WSH dust threshold (330 satoshis).
 dust_p2wsh :: Satoshi
-dust_p2wsh = Satoshi 330
+dust_p2wsh = sat 330
 
--- | Fixed anchor output value (330 satoshis).
+-- | The value of each anchor output (330 satoshis).
 anchor_output_value :: Satoshi
-anchor_output_value = Satoshi 330
+anchor_output_value = sat 330

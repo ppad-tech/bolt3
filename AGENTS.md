@@ -3,13 +3,16 @@
 Haskell implementation of BOLT #3 (Lightning Network transactions).
 
 Specification: https://github.com/lightning/bolts/blob/master/03-transactions.md
+(implemented as of lightning/bolts@1aadb719; copy in `etc/03-transactions.md`).
 
 ## Project Structure
 
-- `lib/` - library source (Lightning.Protocol.BOLT3)
-- `test/` - tests (tasty + tasty-hunit)
+- `lib/` - library source (public API: Lightning.Protocol.BOLT3;
+  submodules are internal)
+- `test/` - tests (tasty, tasty-hunit, tasty-quickcheck), public API only;
+  spec vectors in `test/Vectors.hs`
 - `bench/` - benchmarks (criterion for timing, weigh for allocations)
-- `etc/` - reference materials (BOLT spec)
+- `etc/` - reference materials (BOLT spec, pinned upstream commit)
 - `flake.nix` - nix flake for dependency and build management
 - `ppad-bolt3.cabal` - cabal package definition
 - `CLAUDE.md` / `AGENTS.md` - keep these in sync
@@ -37,6 +40,9 @@ Use ppad libraries (github.com/ppad-tech, git.ppad.tech) liberally.
 
 Use only minimal external dependencies. Prefer GHC's core/boot libraries
 (base, bytestring, primitive, etc.).
+
+Current dependencies: ppad-bolt1, ppad-ripemd160, ppad-secp256k1,
+ppad-sha256, ppad-tx.
 
 **Ask for explicit confirmation before adding any library outside of:**
 - GHC boot/core libraries
@@ -139,6 +145,4 @@ When planning work:
 The flake.nix follows ppad conventions:
 - Uses ppad-nixpkgs as base
 - Follows references to avoid duplication
-- Supports LLVM backend via cabal flag
 - Provides devShell with ghc, cabal, cc, llvm
-
