@@ -432,39 +432,44 @@ where_to_put_secret idx = go 0 where
 
 -- | Insert a secret into the store, validating against existing secrets.
 --
--- Returns Nothing if the secret doesn't derive correctly from known
--- secrets (indicating the secrets weren't generated from the same seed).
+-- Implements insert_secret from BOLT #3: the secret is checked against
+-- every known secret in a lower bucket, then replaces the entry in its
+-- own bucket. Entries in all other buckets are kept, so that every
+-- previously-inserted secret remains derivable via 'derive_old_secret'.
+-- Entries are kept in ascending bucket order.
+--
+-- Returns Nothing if the secret is not 32 bytes, if the index is not
+-- below 2^48, or if a known secret doesn't derive correctly from the
+-- new one (indicating the secrets weren't generated from the same
+-- seed).
 --
 -- >>> insert_secret secret 281474976710655 empty_store
 -- Just (SecretStore ...)
 insert_secret
   :: BS.ByteString  -- ^ secret (32 bytes)
-  -> Word64         -- ^ index
+  -> Word64         -- ^ index (max 2^48 - 1)
   -> SecretStore    -- ^ current store
   -> Maybe SecretStore
-insert_secret secret idx (SecretStore known) = do
-  let !bucket = where_to_put_secret idx
-  -- Validate: for each bucket < this bucket, check we can derive
-  validated <- validateBuckets bucket known
-  if validated
-    then
-      -- Remove entries at bucket >= this bucket, then insert
-      let !known' = filter (\e -> se_bucket e < bucket) known
-          !entry = SecretEntry bucket idx secret
-      in  pure $! SecretStore (known' ++ [entry])
-    else Nothing
+insert_secret secret idx (SecretStore known)
+  | BS.length secret /= 32 = Nothing
+  | idx > 0xFFFFFFFFFFFF = Nothing
+  | all derives known = Just $! SecretStore (put known)
+  | otherwise = Nothing
   where
-    validateBuckets :: Int -> [SecretEntry] -> Maybe Bool
-    validateBuckets b entries = go entries where
-      go [] = Just True
-      go (SecretEntry entryBucket knownIdx knownSecret : rest)
-        | entryBucket >= b = go rest  -- skip entries at higher buckets
-        | otherwise =
-            -- Check if we can derive the known secret from the new one
-            let !derived = derive_secret secret b knownIdx
-            in  if derived == knownSecret
-                then go rest
-                else Nothing
+    !bucket = where_to_put_secret idx
+    !entry = SecretEntry bucket idx secret
+
+    -- known secrets in lower buckets must derive from the new one
+    derives (SecretEntry b knownIdx knownSecret)
+      | b < bucket = derive_secret secret bucket knownIdx == knownSecret
+      | otherwise = True
+
+    -- replace this bucket's entry, preserving ascending bucket order
+    put [] = [entry]
+    put (e : es) = case compare (se_bucket e) bucket of
+      LT -> e : put es
+      EQ -> entry : es
+      GT -> entry : e : es
 {-# INLINE insert_secret #-}
 
 -- | Derive a previously-received secret from the store.
