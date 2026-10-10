@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               ppad-bolt3
-version:            0.0.1
+version:            0.1.0
 synopsis:           Bitcoin transaction formats per BOLT #3
 license:            MIT
 license-file:       LICENSE
@@ -8,10 +8,10 @@ author:             Jared Tobin
 maintainer:         jared@ppad.tech
 category:           Cryptography
 build-type:         Simple
-tested-with:        GHC == 9.10.3
+tested-with:        GHC == { 9.10.3 }
 extra-doc-files:    CHANGELOG
 description:
-  Bitcoin transaction formats for the Lightning Network, per
+  Bitcoin transaction and script formats for the Lightning Network, per
   [BOLT #3](https://github.com/lightning/bolts/blob/master/03-transactions.md).
 
 source-repository head
