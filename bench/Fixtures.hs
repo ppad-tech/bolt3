@@ -104,7 +104,7 @@ build = do
 
   txid <- hex
     "8984484a580b825b9972d7adb15050b3ab624ccd731946b3eeddb92f4e7ef6be"
-  let outpoint = BT.OutPoint (BT.TxId (BS.reverse txid)) 0
+  outpoint <- (\t -> BT.OutPoint t 0) <$> BT.mk_txid (BS.reverse txid)
   cn <- commitment_number 42
   dust <- DustLimit <$> BOLT1.satoshi 546
   to_local <- BOLT1.milli_satoshi 6988000000

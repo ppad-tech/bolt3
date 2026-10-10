@@ -521,9 +521,8 @@ unsigned_tx
   -> BT.Tx
 unsigned_tx version (Locktime lt) prevout (Sequence sq) outs = BT.Tx
   { BT.tx_version   = version
-  , BT.tx_inputs    = BT.TxIn prevout BS.empty sq :| []
+  , BT.tx_inputs    = BT.TxIn prevout BS.empty sq (BT.Witness []) :| []
   , BT.tx_outputs   = outs
-  , BT.tx_witnesses = []
   , BT.tx_locktime  = lt
   }
 
