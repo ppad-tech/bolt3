@@ -49,14 +49,15 @@ test-suite bolt3-tests
       Vectors
 
   ghc-options:
-    -rtsopts -Wall -O2
+    -rtsopts -Wall
 
   build-depends:
       base
     , bytestring
     , ppad-base16
+    , ppad-bolt1
     , ppad-bolt3
-    , ppad-secp256k1 >= 0.5.4 && < 0.6
+    , ppad-secp256k1
     , ppad-sha256
     , ppad-tx
     , QuickCheck
