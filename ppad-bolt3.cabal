@@ -59,6 +59,8 @@ test-suite bolt3-tests
     , ppad-base16
     , ppad-bolt3
     , ppad-secp256k1 >= 0.5.4 && < 0.6
+    , ppad-sha256
+    , ppad-tx
     , QuickCheck
     , tasty
     , tasty-hunit

@@ -2,10 +2,13 @@
 
 module Main where
 
+import qualified Bitcoin.Prim.Tx as BT
 import Control.Monad (foldM)
 import qualified Crypto.Curve.Secp256k1 as S
+import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base16 as B16
+import qualified Data.List.NonEmpty as NE
 import Data.Maybe (isJust, isNothing)
 import Data.Word (Word32, Word64)
 import Test.Tasty
@@ -37,6 +40,15 @@ main = defaultMain $ testGroup "ppad-bolt3" [
   , testGroup "Secret storage" [
       secretStorageTests
     ]
+  , testGroup "Funding transaction" [
+      fundingTests
+    ]
+  , testGroup "Commitment and HTLC transactions" [
+      testGroup "BOLT #3 Appendix C" $
+        fmap (commitVectorTests False) appendix_c
+    , testGroup "BOLT #3 Appendix F (anchors)" $
+        fmap (commitVectorTests True) appendix_f
+    ]
   , testGroup "Fee calculation" [
       feeCalculationTests
     ]
@@ -56,6 +68,10 @@ hex :: BS.ByteString -> IO BS.ByteString
 hex h = case B16.decode h of
   Just bs -> pure bs
   Nothing -> assertFailure ("invalid hex literal: " ++ show h)
+
+-- | Unwrap a Just, failing the enclosing test on Nothing.
+need :: String -> Maybe a -> IO a
+need msg = maybe (assertFailure msg) pure
 
 -- Key derivation test vectors from Appendix E ---------------------------------
 
@@ -93,6 +109,26 @@ keyDerivationTests = testGroup "BOLT #3 Appendix E" [
       case derive_revocationpubkey revocationBasepoint perCommitmentPoint of
         Nothing -> assertFailure "derive_revocationpubkey returned Nothing"
         Just (RevocationPubkey (Pubkey pk)) -> pk @?= expected
+
+  , testCase "derive_per_commitment_point" $ do
+      secret <- PerCommitmentSecret <$> hex
+        "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100"
+      expected <- hex
+        "025f7117a78150fe2ef97db7cfc83bd57b2e2c0d0dd25eaf467a4a1c2a45ce1486"
+      PerCommitmentPoint (Point pcp) <-
+        need "derive_per_commitment_point returned Nothing"
+          (derive_per_commitment_point secret)
+      pcp @?= expected
+
+  , testCase "derive_per_commitment_point' matches vector" $ do
+      secret <- PerCommitmentSecret <$> hex
+        "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100"
+      expected <- hex
+        "025f7117a78150fe2ef97db7cfc83bd57b2e2c0d0dd25eaf467a4a1c2a45ce1486"
+      PerCommitmentPoint (Point pcp) <-
+        need "derive_per_commitment_point' returned Nothing"
+          (derive_per_commitment_point' tex secret)
+      pcp @?= expected
   ]
 
 -- Secret generation test vectors from Appendix D ------------------------------
@@ -204,6 +240,150 @@ storageVectorTest (StorageVector name steps) =
           assertFailure ("accepted incorrect secret at I=" ++ show i)
         (Nothing, True) ->
           assertFailure ("rejected correct secret at I=" ++ show i)
+
+-- Funding transaction test vectors from Appendix B ----------------------------
+
+fundingTests :: TestTree
+fundingTests = testGroup "BOLT #3 Appendix B" [
+    testCase "funding witness script" $ do
+      (lpk, rpk) <- fundingPubkeys
+      wscript <- hex b_funding_wscript
+      unScript (funding_script lpk rpk) @?= wscript
+      unScript (funding_script rpk lpk) @?= wscript
+
+  , testCase "funding output" $ do
+      (lpk, rpk) <- fundingPubkeys
+      tx <- hex b_funding_tx >>= decodeTx
+      txid <- hex b_funding_txid
+      BT.txid tx @?= TxId (BS.reverse txid)
+      case drop (fromIntegral b_funding_output) (NE.toList (BT.tx_outputs tx))
+        of
+          (BT.TxOut value spk : _) -> do
+            value @?= b_funding_satoshis
+            spk @?= unScript (to_p2wsh (funding_script lpk rpk))
+          [] -> assertFailure "missing funding output"
+  ]
+  where
+    fundingPubkeys = do
+      lpk <- FundingPubkey . Pubkey <$> hex b_local_funding_pubkey
+      rpk <- FundingPubkey . Pubkey <$> hex b_remote_funding_pubkey
+      pure (lpk, rpk)
+
+-- Commitment and HTLC transaction test vectors from Appendices C and F --------
+
+-- | Decode a serialized transaction, failing the test on bad input.
+decodeTx :: BS.ByteString -> IO BT.Tx
+decodeTx = need "undecodable transaction" . BT.from_bytes
+
+-- | Decode a hex transaction from the spec and strip its witnesses,
+--   giving the unsigned serialization that the builders produce.
+unsignedTx :: BS.ByteString -> IO BS.ByteString
+unsignedTx h = BT.to_bytes_legacy <$> (hex h >>= decodeTx)
+
+-- | A test HTLC from the Appendix C parameters.
+testHtlc :: Int -> IO HTLC
+testHtlc i = case drop i c_htlcs of
+  (TestHtlc offered amt expiry pre : _) -> do
+    preimage <- hex pre
+    pure HTLC
+      { htlc_direction = if offered then HTLCOffered else HTLCReceived
+      , htlc_amount_msat = MilliSatoshi amt
+      , htlc_payment_hash = PaymentHash (SHA256.hash preimage)
+      , htlc_cltv_expiry = CltvExpiry expiry
+      }
+  [] -> assertFailure ("no test HTLC #" ++ show i)
+
+-- | Commitment keys from the Appendix C parameters, which Appendix F
+--   shares.
+vectorKeys :: IO CommitmentKeys
+vectorKeys = do
+  revocation <- pk c_local_revocation_pubkey
+  delayed <- pk c_local_delayedpubkey
+  localHtlc <- pk c_local_htlcpubkey
+  remoteHtlc <- pk c_remote_htlcpubkey
+  remotePayment <- pk c_remote_payment_basepoint
+  localFunding <- pk c_local_funding_pubkey
+  remoteFunding <- pk c_remote_funding_pubkey
+  pure CommitmentKeys
+    { ck_revocation_pubkey = RevocationPubkey revocation
+    , ck_local_delayed = LocalDelayedPubkey delayed
+    , ck_local_htlc = LocalHtlcPubkey localHtlc
+    , ck_remote_htlc = RemoteHtlcPubkey remoteHtlc
+      -- the vectors use the payment basepoints as htlc basepoints, so
+      -- localpubkey equals local_htlcpubkey
+    , ck_local_payment = LocalPubkey localHtlc
+      -- to_remote pays P2WPKH(remote_payment_basepoint)
+    , ck_remote_payment = RemotePubkey remotePayment
+    , ck_local_funding = FundingPubkey localFunding
+    , ck_remote_funding = FundingPubkey remoteFunding
+    }
+  where
+    pk = fmap Pubkey . hex
+
+-- | The commitment context for a vector: local's commitment, with local
+--   as the opener.
+vectorContext :: Bool -> CommitVector -> IO CommitmentContext
+vectorContext anchors v = do
+  keys <- vectorKeys
+  fundingTxid <- hex c_funding_txid
+  localBp <- PaymentBasepoint . Point <$> hex c_local_payment_basepoint
+  remoteBp <- PaymentBasepoint . Point <$> hex c_remote_payment_basepoint
+  cn <- need "invalid commitment number"
+          (commitment_number c_commitment_number)
+  htlcs <- traverse testHtlc (cv_htlcs v)
+  pure CommitmentContext
+    { cc_funding_outpoint =
+        OutPoint (TxId (BS.reverse fundingTxid)) c_funding_output_index
+    , cc_commitment_number = cn
+    , cc_local_payment_bp = localBp
+    , cc_remote_payment_bp = remoteBp
+    , cc_to_self_delay = ToSelfDelay c_local_delay
+    , cc_dust_limit = DustLimit (Satoshi (cv_dust_limit_sat v))
+    , cc_feerate = FeeratePerKw (cv_feerate_per_kw v)
+    , cc_features = ChannelFeatures { cf_option_anchors = anchors }
+    , cc_is_funder = True
+    , cc_to_local_msat = MilliSatoshi (cv_to_local_msat v)
+    , cc_to_remote_msat = MilliSatoshi (cv_to_remote_msat v)
+    , cc_htlcs = htlcs
+    , cc_keys = keys
+    }
+
+-- | Assert that the commitment tx and each HTLC tx of a vector match
+--   the spec's, with witnesses stripped.
+commitVectorTests :: Bool -> CommitVector -> TestTree
+commitVectorTests anchors v = testGroup (cv_name v) $
+    testCase "commitment tx" (do
+      ctx <- vectorContext anchors v
+      expected <- unsignedTx (cv_commit_tx v)
+      encode_tx (build_commitment_tx ctx) @?= Just expected)
+  : fmap htlcTxTest (cv_htlc_txs v)
+  where
+    htlcTxTest (HtlcTxVector kind i out raw) =
+      testCase (kindName kind ++ " for htlc #" ++ show i
+                 ++ " (output " ++ show out ++ ")") $ do
+        ctx <- vectorContext anchors v
+        commit <- need "empty commitment tx"
+                    (commitment_to_tx (build_commitment_tx ctx))
+        htlc <- testHtlc i
+        expected <- unsignedTx raw
+        let keys = cc_keys ctx
+            hctx = HTLCContext
+              { hc_commitment_txid = BT.txid commit
+              , hc_output_index = out
+              , hc_htlc = htlc
+              , hc_to_self_delay = cc_to_self_delay ctx
+              , hc_feerate = cc_feerate ctx
+              , hc_features = cc_features ctx
+              , hc_revocation_pubkey = ck_revocation_pubkey keys
+              , hc_local_delayed = ck_local_delayed keys
+              }
+        encode_htlc_tx (build kind hctx) @?= expected
+
+    kindName HtlcSuccess = "htlc-success tx"
+    kindName HtlcTimeout = "htlc-timeout tx"
+
+    build HtlcSuccess = build_htlc_success_tx
+    build HtlcTimeout = build_htlc_timeout_tx
 
 -- Fee calculation tests -------------------------------------------------------
 
