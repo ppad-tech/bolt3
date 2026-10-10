@@ -2,6 +2,7 @@
 
 module Main where
 
+import Control.Monad (foldM)
 import qualified Crypto.Curve.Secp256k1 as S
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base16 as B16
@@ -16,6 +17,7 @@ import Lightning.Protocol.BOLT3.Types
   , PaymentHash(..), PerCommitmentPoint(..)
   , PerCommitmentSecret(..)
   )
+import Vectors
 
 -- Module-level wNAF context. Built once; reused across every
 -- equivalence test below. Mirrors how downstream callers should use
@@ -141,48 +143,67 @@ secretGenerationTests = testGroup "BOLT #3 Appendix D - Generation" [
 -- Secret storage test vectors from Appendix D ---------------------------------
 
 secretStorageTests :: TestTree
-secretStorageTests = testGroup "BOLT #3 Appendix D - Storage" [
-    testCase "insert_secret correct sequence" $ do
-      secrets <- traverse (\(i, s) -> (,) i <$> hex s) [
-          (281474976710655,
-            "7cc854b54e3e0dcdb010d7a3fee464a9687be6e8db3be6854c475621e007a5dc")
-        , (281474976710654,
-            "c7518c8ae4660ed02894df8976fa1a3659c1a8b4b5bec0c4b872abeba4cb8964")
-        , (281474976710653,
-            "2273e227a5b7449b6e70f1fb4652864038b1cbf9cd7c043a7d6456b7fc275ad8")
-        , (281474976710652,
-            "27cddaa5624534cb6cb9d7da077cf2b22ab21e9b506fd4998a51d54502e99116")
-        , (281474976710651,
-            "c65716add7aa98ba7acb236352d665cab17345fe45b55fb879ff80e6bd0c41dd")
-        , (281474976710650,
-            "969660042a28f32d9be17344e09374b379962d03db1574df5a8a5a47e19ce3f2")
-        , (281474976710649,
-            "a5a64476122ca0925fb344bdc1854c1c0a59fc614298e50a33e331980a220f32")
-        , (281474976710648,
-            "05cde6323d949933f7f7b78776bcc1ea6d9b31447732e3802e1f7ac44b650e17")
-        ]
-      let insertAll store [] = Just store
-          insertAll store ((idx, secret):rest) =
-            case insert_secret secret idx store of
-              Nothing -> Nothing
-              Just store' -> insertAll store' rest
-      case insertAll empty_store secrets of
-        Nothing -> assertFailure "insert_secret failed on correct sequence"
-        Just _ -> return ()
+secretStorageTests = testGroup "BOLT #3 Appendix D - Storage" $
+     fmap storageVectorTest appendix_d_storage
+  ++ [
+    testCase "derive_old_secret after each correct insert" $ do
+      steps <- case filter isCorrect appendix_d_storage of
+        (v : _) -> pure (sv_steps v)
+        [] -> assertFailure "missing correct sequence vector"
+      known <- traverse (\st -> (,) (ss_index st) <$> hex (ss_secret st))
+                 steps
+      -- after each insert, every index inserted so far is derivable
+      let step (store, seen) (i, sec) = do
+            store' <- case insert_secret sec i store of
+              Just st -> pure st
+              Nothing -> assertFailure
+                ("rejected correct secret at I=" ++ show i)
+            let seen' = (i, sec) : seen
+            mapM_ (\(j, s) ->
+                    assertEqual
+                      ("after I=" ++ show i ++ ", derive_old_secret "
+                        ++ show j)
+                      (Just s) (derive_old_secret j store'))
+                  seen'
+            pure (store', seen')
+      (store, _) <- foldM step (empty_store, []) known
+      -- the next index has not been received
+      assertEqual "derive_old_secret of unreceived index"
+        Nothing (derive_old_secret 281474976710647 store)
 
-  , testCase "insert_secret #1 incorrect" $ do
-      -- First secret is from wrong seed, second should fail
-      s0 <- hex
-        "02a40c85b6f28da08dfdbe0926c53fab2de6d28c10301f8f7c4073d5e42e3148"
-      s1 <- hex
-        "c7518c8ae4660ed02894df8976fa1a3659c1a8b4b5bec0c4b872abeba4cb8964"
-      case insert_secret s0 281474976710655 empty_store of
-        Nothing -> assertFailure "First insert should succeed"
-        Just store1 ->
-          case insert_secret s1 281474976710654 store1 of
-            Nothing -> return ()  -- Expected to fail
-            Just _ -> assertFailure "Second insert should fail"
+  , testCase "insert_secret rejects 31-byte secret" $
+      isNothing (insert_secret (BS.replicate 31 0) maxCommitNum empty_store)
+        @?= True
+  , testCase "insert_secret rejects 33-byte secret" $
+      isNothing (insert_secret (BS.replicate 33 0) maxCommitNum empty_store)
+        @?= True
+  , testCase "insert_secret rejects index 2^48" $
+      isNothing
+        (insert_secret (BS.replicate 32 0) (maxCommitNum + 1) empty_store)
+        @?= True
+  , testCase "insert_secret accepts index 2^48-1" $
+      isJust (insert_secret (BS.replicate 32 0) maxCommitNum empty_store)
+        @?= True
   ]
+  where
+    isCorrect v = sv_name v == "insert_secret correct sequence"
+
+-- | Run a storage vector, asserting that each insert_secret call is
+--   accepted or rejected exactly as the spec says.
+storageVectorTest :: StorageVector -> TestTree
+storageVectorTest (StorageVector name steps) =
+    testCase name (go empty_store steps)
+  where
+    go _ [] = pure ()
+    go store (StorageStep i ok s : rest) = do
+      sec <- hex s
+      case (insert_secret sec i store, ok) of
+        (Just store', True) -> go store' rest
+        (Nothing, False) -> go store rest
+        (Just _, False) ->
+          assertFailure ("accepted incorrect secret at I=" ++ show i)
+        (Nothing, True) ->
+          assertFailure ("rejected correct secret at I=" ++ show i)
 
 -- Fee calculation tests -------------------------------------------------------
 
@@ -400,6 +421,8 @@ propertyTests = testGroup "invariants" [
       propTrimPartition
   , testProperty "commitment_fee increases with HTLCs"
       propFeeMonotonic
+  , testProperty "insert_secret keeps every inserted secret derivable"
+      propSecretStoreDerivable
   , testProperty "derive_per_commitment_point' ≡ derive_per_commitment_point"
       propDerivePcpEquiv
   , testProperty "derive_pubkey' ≡ derive_pubkey"
@@ -481,6 +504,30 @@ propDeriveRemoteDelEquiv =
     let dbp = DelayedPaymentBasepoint bp
     in  derive_remote_delayedpubkey' tex dbp pcp
           === derive_remote_delayedpubkey dbp pcp
+
+-- | After inserting a prefix of a correct sequence (descending from
+--   2^48-1, all from one seed), every inserted index is derivable and
+--   the store's buckets are strictly ascending.
+propSecretStoreDerivable :: Property
+propSecretStoreDerivable =
+  forAll (vectorOf 32 (choose (0, 255 :: Int))) $ \sd ->
+  forAll (choose (1, 1024)) $ \n ->
+    let seed = BS.pack (fmap fromIntegral sd)
+        idxs = take n [maxCommitNum, maxCommitNum - 1 ..]
+        secret = generate_from_seed seed
+        insert st i = st >>= insert_secret (secret i) i
+    in  case foldl insert (Just empty_store) idxs of
+          Nothing -> counterexample "insert_secret rejected" False
+          Just store ->
+            let buckets = fmap se_bucket (unSecretStore store)
+            in  conjoin
+                  [ counterexample "buckets not ascending"
+                      (and (zipWith (<) buckets (drop 1 buckets)))
+                  , conjoin
+                      [ counterexample ("index " ++ show i)
+                          (derive_old_secret i store === Just (secret i))
+                      | i <- idxs ]
+                  ]
 
 -- | commitment_number accepts values in [0, 2^48-1] and
 --   rejects values >= 2^48.
