@@ -53,8 +53,8 @@ test-suite bolt3-tests
 
   build-depends:
       base
-    , base16-bytestring
     , bytestring
+    , ppad-base16
     , ppad-bolt3
     , ppad-secp256k1 >= 0.5.4 && < 0.6
     , QuickCheck
